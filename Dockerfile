@@ -15,8 +15,8 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/* \
-    && groupadd -g 10001 webssh \
-    && useradd -u 10001 -g webssh -m -s /usr/sbin/nologin webssh
+    && groupadd -g 1000 webssh \
+    && useradd -u 1000 -g 1000 -m -s /usr/sbin/nologin webssh
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt

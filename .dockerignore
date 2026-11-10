@@ -7,7 +7,6 @@ env/
 .git/
 .github/
 data/
-ui_backup_v1/
 vault.key
 profiles.json
 playbooks.json

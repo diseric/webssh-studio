@@ -283,18 +283,6 @@ def load_auth_config() -> dict:
     if AUTH_CONFIG_PATH.exists():
         try:
             cfg = json.loads(AUTH_CONFIG_PATH.read_text(encoding="utf-8"))
-            changed = False
-            if env_pw:
-                if not cfg.get("password_hash"):
-                    salt = secrets.token_hex(16)
-                    cfg["salt"] = salt
-                    cfg["password_hash"] = _hash_password(env_pw, salt)
-                    changed = True
-                if not cfg.get("enabled"):
-                    cfg["enabled"] = True
-                    changed = True
-            if changed:
-                save_auth_config(cfg)
             return cfg
         except Exception:
             pass
@@ -611,11 +599,41 @@ def _is_https_request(request: Request) -> bool:
 @app.middleware("http")
 async def auth_guard_middleware(request: Request, call_next):
     path = request.url.path
+    if path.startswith("/api/") and request.method in ("POST", "PUT", "DELETE"):
+        origin = request.headers.get("origin")
+        host = request.headers.get("host")
+        if origin and host:
+            from urllib.parse import urlparse
+            parsed_origin = urlparse(origin)
+            allowed_list = [o.strip() for o in _allowed_origins_env.split(",") if o.strip()]
+            if (
+                parsed_origin.netloc
+                and parsed_origin.netloc.lower() != host.lower()
+                and origin not in allowed_list
+            ):
+                return JSONResponse(
+                    status_code=403,
+                    content={"detail": "Cross-origin state-changing request blocked."},
+                )
+
     if path.startswith("/api/") and not path.startswith("/api/auth/") and path != "/api/info":
         authed, _, _ = _is_request_authenticated(request)
         if not authed:
             return JSONResponse(status_code=401, content={"detail": "Authentication required"})
+
     response = await call_next(request)
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "same-origin"
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; "
+        "script-src 'self' https://cdn.jsdelivr.net; "
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.jsdelivr.net; "
+        "font-src 'self' https://fonts.gstatic.com; "
+        "img-src 'self' data: https:; "
+        "connect-src 'self' ws: wss:; "
+        "frame-ancestors 'none'"
+    )
     if path == "/" or path.startswith("/static/"):
         response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
         response.headers["Pragma"] = "no-cache"
@@ -695,6 +713,7 @@ async def setup_app_auth(req: AuthSetupRequest, request: Request, response: Resp
             salt = secrets.token_hex(16)
             cfg["salt"] = salt
             cfg["password_hash"] = _hash_password(req.new_password, salt)
+            AUTH_TOKENS.clear()
         elif not cfg.get("password_hash"):
             raise HTTPException(status_code=400, detail="Please provide a new master password.")
         cfg["enabled"] = True
@@ -715,7 +734,9 @@ async def setup_app_auth(req: AuthSetupRequest, request: Request, response: Resp
         cfg["enabled"] = False
         cfg["salt"] = ""
         cfg["password_hash"] = ""
+        AUTH_TOKENS.clear()
         save_auth_config(cfg)
+        response.delete_cookie("webssh_token")
         return {"status": "disabled", "auth_enabled": False}
 
 
@@ -1009,6 +1030,14 @@ async def rename_remote_file(session_id: str, req: RenameRequest):
 MAX_ZIP_TOTAL_BYTES = 100 * 1024 * 1024
 MAX_ZIP_FILES = 2000
 MAX_UPLOAD_TOTAL_BYTES = 50 * 1024 * 1024
+MAX_SINGLE_DOWNLOAD_BYTES = 250 * 1024 * 1024
+
+
+def _safe_disposition_filename(raw_name: str, fallback: str = "download.bin") -> str:
+    cleaned = "".join(
+        ch for ch in (raw_name or "") if ch >= " " and ch not in ('"', "'", "\\", "/", ";", "\r", "\n")
+    ).strip()
+    return cleaned or fallback
 
 
 @app.get("/api/sessions/{session_id}/download-zip")
@@ -1057,7 +1086,7 @@ async def download_remote_zip(session_id: str, path: str = Query(default="/")):
 
     try:
         zbuf = await asyncio.to_thread(_build_zip)
-        base_name = posixpath.basename(path.rstrip("/")) or "remote_archive"
+        base_name = _safe_disposition_filename(posixpath.basename(path.rstrip("/")), "remote_archive")
         return StreamingResponse(
             zbuf,
             media_type="application/zip",
@@ -1111,18 +1140,33 @@ async def download_remote_file(session_id: str, path: str = Query(...)):
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    def _read_bytes():
+    def _open_remote_stream():
         sftp = session.ensure_sftp()
-        buf = io.BytesIO()
-        sftp.getfo(path, buf)
-        buf.seek(0)
-        return buf
+        st = sftp.stat(path)
+        fsize = st.st_size or 0
+        if fsize > MAX_SINGLE_DOWNLOAD_BYTES:
+            raise ValueError("File exceeds maximum download size limit (250 MB).")
+        return sftp.open(path, "rb")
 
     try:
-        buf = await asyncio.to_thread(_read_bytes)
-        filename = posixpath.basename(path.rstrip("/")) or "download.bin"
+        remote_file = await asyncio.to_thread(_open_remote_stream)
+        filename = _safe_disposition_filename(posixpath.basename(path.rstrip("/")), "download.bin")
+
+        def _chunk_iter():
+            try:
+                while True:
+                    chunk = remote_file.read(65536)
+                    if not chunk:
+                        break
+                    yield chunk
+            finally:
+                try:
+                    remote_file.close()
+                except Exception:
+                    pass
+
         return StreamingResponse(
-            buf,
+            _chunk_iter(),
             media_type="application/octet-stream",
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
