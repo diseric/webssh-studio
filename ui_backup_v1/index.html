@@ -1,0 +1,535 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>WebSSH Studio — Browser SSH Terminal, SFTP, Editor, Telemetry &amp; Tunnels</title>
+  <!-- xterm.js + addons -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css" />
+  <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xterm-addon-web-links@0.9.0/lib/xterm-addon-web-links.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xterm-addon-search@0.13.0/lib/xterm-addon-search.min.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <!-- Full-window Drag Overlay -->
+  <div id="global-drop-overlay" class="global-drop-overlay hidden">
+    <div class="global-drop-box">
+      <div class="drop-icon-pulse">⬆️</div>
+      <h2>Drop Files to Transfer to Remote Machine</h2>
+      <p>Destination: <code id="overlay-target-dir">/</code></p>
+    </div>
+  </div>
+
+  <!-- Top Header Bar -->
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-logo">
+        <span class="terminal-glyph">&gt;_</span>
+      </div>
+      <div>
+        <h1>WebSSH Studio</h1>
+        <span class="brand-subtitle">SSH2 Terminal • Drag &amp; Drop SFTP • Editor • Telemetry • Tunnels</span>
+      </div>
+    </div>
+
+    <!-- Session Tabs -->
+    <div id="session-tabs" class="session-tabs" role="tablist" aria-label="Active SSH Sessions"></div>
+
+    <div class="topbar-actions">
+      <button id="btn-toggle-broadcast" class="btn btn-outline btn-sm" title="Broadcast keystrokes and commands to all open SSH tabs simultaneously">
+        📡 Broadcast: Off
+      </button>
+      <button id="btn-toggle-split" class="btn btn-outline btn-sm" title="Split terminal workspace to view two SSH sessions side-by-side">
+        ◫ Split View
+      </button>
+      <button id="btn-open-ssh-config" class="btn btn-secondary btn-sm" title="Import hosts from ~/.ssh/config">
+        📥 Import SSH Config
+      </button>
+      <button id="btn-quick-sandbox" class="btn btn-emerald btn-sm" title="Connect to the built-in local SSH2 + SFTP Sandbox Server on 127.0.0.1:2222">
+        ⚡ Quick Connect Sandbox
+      </button>
+      <button id="btn-new-connection" class="btn btn-primary btn-sm">
+        + New SSH Connection
+      </button>
+    </div>
+  </header>
+
+  <!-- Main Workspace -->
+  <main class="workspace">
+    <!-- Left / Center: Interactive SSH Terminal + Live Telemetry HUD -->
+    <section class="terminal-pane" aria-label="SSH Terminal Pane">
+      <div class="pane-header">
+        <div class="conn-status">
+          <span id="status-dot" class="status-dot disconnected"></span>
+          <span id="status-text" class="status-label">Not connected</span>
+          <span id="session-host-badge" class="host-badge hidden"></span>
+          <span id="jump-host-badge" class="jump-badge hidden"></span>
+        </div>
+
+        <div class="terminal-toolbar">
+          <div class="quick-cmds" aria-label="Quick terminal commands">
+            <button class="chip-btn" data-cmd="ls -la">ls -la</button>
+            <button class="chip-btn" data-cmd="pwd">pwd</button>
+            <button class="chip-btn" data-cmd="whoami">whoami</button>
+            <button class="chip-btn" data-cmd="uname -a">uname -a</button>
+          </div>
+          <div class="toolbar-divider"></div>
+          <!-- Terminal Search Input -->
+          <div class="term-search-box">
+            <input id="term-search-input" type="text" placeholder="Search terminal..." aria-label="Search terminal output" />
+            <button id="btn-search-prev" class="icon-btn" title="Previous match">↑</button>
+            <button id="btn-search-next" class="icon-btn" title="Next match">↓</button>
+          </div>
+          <div class="toolbar-divider"></div>
+          <button id="btn-font-dec" class="icon-btn" title="Decrease font size" aria-label="Decrease font size">A-</button>
+          <button id="btn-font-inc" class="icon-btn" title="Increase font size" aria-label="Increase font size">A+</button>
+          <button id="btn-export-log" class="icon-btn" title="Export terminal session transcript (.log)">💾 Log</button>
+          <button id="btn-clear-term" class="icon-btn" title="Clear terminal">Clear</button>
+          <button id="btn-disconnect" class="icon-btn danger hidden" title="Disconnect SSH session">Disconnect</button>
+        </div>
+      </div>
+
+      <!-- Feature 3: Live Server Telemetry HUD Bar -->
+      <div id="telemetry-hud" class="telemetry-hud hidden" aria-label="Live Server Resource Telemetry">
+        <div class="hud-metric">
+          <span class="hud-label">CPU</span>
+          <div class="hud-bar"><div id="hud-cpu-fill" class="hud-bar-fill" style="width: 0%"></div></div>
+          <span id="hud-cpu-val" class="hud-val">0%</span>
+        </div>
+        <div class="hud-metric">
+          <span class="hud-label">RAM</span>
+          <div class="hud-bar"><div id="hud-ram-fill" class="hud-bar-fill" style="width: 0%"></div></div>
+          <span id="hud-ram-val" class="hud-val">0%</span>
+        </div>
+        <div class="hud-metric">
+          <span class="hud-label">DISK</span>
+          <div class="hud-bar"><div id="hud-disk-fill" class="hud-bar-fill" style="width: 0%"></div></div>
+          <span id="hud-disk-val" class="hud-val">0%</span>
+        </div>
+        <div class="hud-meta">
+          <span id="hud-uptime">Uptime: --</span>
+          <label class="sync-cwd-toggle" title="Automatically sync SFTP browser directory when you cd in the terminal">
+            <input type="checkbox" id="chk-sync-cwd" checked />
+            <span>Auto-sync SFTP on <code>cd</code></span>
+          </label>
+        </div>
+      </div>
+
+      <div class="terminal-body-wrapper">
+        <!-- Empty State before connection -->
+        <div id="terminal-empty-state" class="terminal-empty-state">
+          <div class="empty-card">
+            <div class="empty-icon">🖥️</div>
+            <h2>Connect to an SSH Server</h2>
+            <p>Open an interactive PTY terminal session, drag &amp; drop files via SFTP, edit remote files in-browser, monitor live telemetry, and manage SSH port tunnels.</p>
+            <div class="empty-actions">
+              <button id="btn-empty-sandbox" class="btn btn-emerald btn-lg">
+                ⚡ Launch Local SSH Sandbox (127.0.0.1:2222)
+              </button>
+              <button id="btn-empty-custom" class="btn btn-secondary btn-lg">
+                🔑 Connect or Choose Saved Profile...
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Terminal Grid (supports single or side-by-side split view) -->
+        <div id="terminal-container" class="terminal-container" tabindex="0" aria-label="Interactive SSH Terminal"></div>
+      </div>
+    </section>
+
+    <!-- Right: Multi-Tool Sidebar (SFTP & Dropzone | Playbooks | Tunnels | Processes) -->
+    <aside class="transfer-pane" aria-label="Workspace Tools Sidebar">
+      <div class="sidebar-nav" role="tablist" aria-label="Sidebar Tool Tabs">
+        <button class="sidebar-tab active" data-tab="sftp" role="tab" aria-selected="true">
+          📁 SFTP &amp; Drop
+          <span id="transfer-counter-badge" class="badge">0</span>
+        </button>
+        <button class="sidebar-tab" data-tab="playbooks" role="tab" aria-selected="false">
+          📜 Playbooks
+        </button>
+        <button class="sidebar-tab" data-tab="tunnels" role="tab" aria-selected="false">
+          🚇 Tunnels
+          <span id="tunnel-counter-badge" class="badge">0</span>
+        </button>
+        <button class="sidebar-tab" data-tab="processes" role="tab" aria-selected="false">
+          📊 Processes
+        </button>
+      </div>
+
+      <!-- TAB 1: SFTP File Transfer & Remote File Browser -->
+      <div id="tab-panel-sftp" class="transfer-content">
+        <!-- Target Remote Path Bar -->
+        <div class="target-dir-bar">
+          <div class="dir-header-row">
+            <label for="remote-path-input" class="dir-label">Remote Target Path:</label>
+            <button id="btn-download-dir-zip" class="btn btn-xs btn-outline" title="Download current remote directory as a .zip archive">
+              📦 Download Folder (.zip)
+            </button>
+          </div>
+          <div class="dir-input-row">
+            <button id="btn-dir-up" class="icon-btn" title="Parent directory (..)" aria-label="Parent directory">⬆️</button>
+            <input id="remote-path-input" type="text" value="/" spellcheck="false" aria-label="Remote target directory path" />
+            <button id="btn-dir-go" class="icon-btn" title="Go to directory">Go</button>
+            <button id="btn-dir-mkdir" class="icon-btn" title="Create new remote folder">+ Folder</button>
+            <button id="btn-dir-refresh" class="icon-btn" title="Refresh remote files">↻</button>
+          </div>
+        </div>
+
+        <!-- Drag and Drop Area -->
+        <div id="dropzone" class="dropzone" role="region" aria-label="File Drag and Drop Transfer Area" tabindex="0">
+          <input id="file-input" type="file" multiple class="hidden" />
+          <div class="dropzone-inner">
+            <div class="dropzone-icon">📥</div>
+            <div class="dropzone-text">
+              <strong>Drag &amp; Drop files here</strong> to transfer to the remote machine
+              <span>or <button type="button" id="btn-browse-files" class="link-btn">browse your computer</button></span>
+            </div>
+          </div>
+          <div class="dropzone-Quick-tools">
+            <button type="button" id="btn-quick-compose" class="btn btn-xs btn-outline" title="Create and transfer a file directly from the browser">
+              📝 Create &amp; Transfer File
+            </button>
+            <button type="button" id="btn-demo-drop" class="btn btn-xs btn-outline" title="Simulate dropping a sample payload file to test SFTP transfer">
+              🚀 Drop Sample File
+            </button>
+          </div>
+        </div>
+
+        <div class="transfer-options">
+          <label class="checkbox-label">
+            <input type="checkbox" id="chk-echo-terminal" checked />
+            <span>Show transferred file notification in SSH terminal</span>
+          </label>
+        </div>
+
+        <!-- Transfer Progress & Activity Log -->
+        <div id="transfer-queue-section" class="transfer-queue-section hidden">
+          <div class="section-header-row">
+            <h3>Transfer Activity</h3>
+            <button id="btn-clear-transfers" class="text-btn">Clear</button>
+          </div>
+          <div id="transfer-list" class="transfer-list"></div>
+        </div>
+
+        <!-- Remote Machine File Explorer -->
+        <div class="remote-browser-section">
+          <div class="section-header-row">
+            <h3>Remote Files (<code id="browser-cur-dir">/</code>)</h3>
+            <span id="remote-file-count" class="muted-meta">0 items</span>
+          </div>
+          <div id="remote-file-list" class="remote-file-list" role="list">
+            <div class="empty-files-msg">Connect to an SSH session to browse, edit, and transfer files.</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- TAB 2: Saved Command Snippets / Playbooks -->
+      <div id="tab-panel-playbooks" class="transfer-content hidden">
+        <div class="panel-intro">
+          <div class="section-header-row">
+            <h3>Command Playbooks &amp; Snippets</h3>
+            <button type="button" id="btn-reset-playbooks" class="btn btn-xs btn-outline" title="Restore the 15 default DevOps &amp; SysAdmin playbooks">
+              ↻ Reset 15 Defaults
+            </button>
+          </div>
+          <p>Reusable one-click scripts executed in the active SSH terminal (or all tabs when Broadcast is active).</p>
+        </div>
+
+        <!-- Category Filter Pill Bar -->
+        <div id="playbook-category-bar" class="category-pill-bar" role="tablist" aria-label="Playbook Categories"></div>
+
+        <details class="new-playbook-accordion">
+          <summary>+ Create Custom Playbook</summary>
+          <form id="playbook-form" class="mini-card-form mt-2">
+            <div class="form-row">
+              <div class="form-group flex-2">
+                <label for="pb-name">Playbook Name</label>
+                <input id="pb-name" type="text" placeholder="e.g. Restart Nginx & Check Status" required />
+              </div>
+              <div class="form-group flex-1">
+                <label for="pb-category">Category</label>
+                <select id="pb-category">
+                  <option value="Diagnostics">Diagnostics</option>
+                  <option value="Storage">Storage</option>
+                  <option value="Networking">Networking</option>
+                  <option value="Security">Security</option>
+                  <option value="Containers & Git">Containers &amp; Git</option>
+                  <option value="Custom" selected>Custom</option>
+                </select>
+              </div>
+            </div>
+            <div class="form-group">
+              <label for="pb-description">Short Description</label>
+              <input id="pb-description" type="text" placeholder="What this playbook checks or automates..." />
+            </div>
+            <div class="form-group">
+              <label for="pb-command">Shell Command(s)</label>
+              <textarea id="pb-command" rows="2" placeholder="uname -a && ls -la" required></textarea>
+            </div>
+            <button type="submit" class="btn btn-primary btn-sm">+ Save Playbook</button>
+          </form>
+        </details>
+
+        <div id="playbook-list" class="card-stack-list"></div>
+      </div>
+
+      <!-- TAB 3: SSH Port Forwarding (Tunnels -L) -->
+      <div id="tab-panel-tunnels" class="transfer-content hidden">
+        <div class="panel-intro">
+          <div>
+            <h3>SSH Local Port Forwarding (<code>-L</code>)</h3>
+            <p>Bind a local TCP port on <code>127.0.0.1</code> and tunnel traffic through the active SSH connection.</p>
+          </div>
+        </div>
+
+        <form id="tunnel-form" class="mini-card-form">
+          <div class="form-row">
+            <div class="form-group flex-2">
+              <label for="tun-label">Tunnel Label</label>
+              <input id="tun-label" type="text" value="Web Dashboard Tunnel" required />
+            </div>
+            <div class="form-group flex-1">
+              <label for="tun-local-port">Local Port</label>
+              <input id="tun-local-port" type="number" value="9090" min="1024" max="65535" required />
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group flex-2">
+              <label for="tun-remote-host">Remote Target Host</label>
+              <input id="tun-remote-host" type="text" value="127.0.0.1" required />
+            </div>
+            <div class="form-group flex-1">
+              <label for="tun-remote-port">Remote Port</label>
+              <input id="tun-remote-port" type="number" value="8090" min="1" max="65535" required />
+            </div>
+          </div>
+          <button type="submit" class="btn btn-emerald btn-sm">🚇 Start Local Port Forward</button>
+        </form>
+
+        <div id="tunnel-list" class="card-stack-list">
+          <div class="empty-files-msg">No active port tunnels for this session.</div>
+        </div>
+      </div>
+
+      <!-- TAB 4: Live Process & System Telemetry Inspector -->
+      <div id="tab-panel-processes" class="transfer-content hidden">
+        <div class="section-header-row">
+          <h3>Top Remote Processes</h3>
+          <button id="btn-refresh-telemetry" class="btn btn-xs btn-outline">↻ Refresh Now</button>
+        </div>
+        <div id="process-table-wrapper" class="process-table-wrapper">
+          <table class="process-table">
+            <thead>
+              <tr>
+                <th>PID</th>
+                <th>Process</th>
+                <th>CPU %</th>
+                <th>MEM %</th>
+              </tr>
+            </thead>
+            <tbody id="process-tbody">
+              <tr><td colspan="4" class="empty-files-msg">Connect to an SSH session to inspect live processes.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </aside>
+  </main>
+
+  <!-- SSH Connection & Vault Modal -->
+  <div id="connect-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="connect-modal-title">
+    <div class="modal-card modal-lg">
+      <div class="modal-header">
+        <h2 id="connect-modal-title">SSH Connection &amp; Encrypted Profile Vault</h2>
+        <button id="btn-close-modal" class="icon-btn" aria-label="Close connection dialog">✕</button>
+      </div>
+
+      <div class="modal-body">
+        <!-- Saved Profiles Bar -->
+        <div class="vault-section">
+          <div class="section-header-row">
+            <h3>Saved Connection Profiles (Encrypted Vault)</h3>
+            <button type="button" id="btn-fill-sandbox" class="btn btn-emerald btn-xs">⚡ Fill Sandbox Preset</button>
+          </div>
+          <div id="saved-profiles-list" class="saved-profiles-grid"></div>
+        </div>
+
+        <form id="ssh-connect-form">
+          <div class="form-row">
+            <div class="form-group flex-2">
+              <label for="ssh-profile-name">Profile Label (optional, for saving)</label>
+              <input id="ssh-profile-name" type="text" placeholder="e.g. Prod API Server" />
+            </div>
+            <div class="form-group flex-2">
+              <label for="ssh-host">Host / IP Address</label>
+              <input id="ssh-host" type="text" placeholder="127.0.0.1" value="127.0.0.1" required />
+            </div>
+            <div class="form-group flex-1">
+              <label for="ssh-port">Port</label>
+              <input id="ssh-port" type="number" value="2222" min="1" max="65535" required />
+            </div>
+          </div>
+
+          <div class="form-row">
+            <div class="form-group flex-2">
+              <label for="ssh-username">Username</label>
+              <input id="ssh-username" type="text" placeholder="demo, ubuntu, root..." value="demo" required />
+            </div>
+            <div class="form-group flex-2">
+              <label for="ssh-auth-type">Authentication Method</label>
+              <select id="ssh-auth-type">
+                <option value="password">Password</option>
+                <option value="key">Private Key (PEM / OpenSSH)</option>
+              </select>
+            </div>
+          </div>
+
+          <div id="auth-password-group" class="form-group">
+            <label for="ssh-password">Password</label>
+            <input id="ssh-password" type="password" placeholder="Enter SSH password" value="demo" />
+          </div>
+
+          <div id="auth-key-group" class="form-group hidden">
+            <label for="ssh-private-key">Private Key (PEM / OpenSSH format)</label>
+            <textarea id="ssh-private-key" rows="3" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"></textarea>
+            <label for="ssh-passphrase" class="mt-2">Key Passphrase (optional)</label>
+            <input id="ssh-passphrase" type="password" placeholder="Optional passphrase" />
+          </div>
+
+          <!-- Feature 4: Bastion / Jump Host (ProxyJump) -->
+          <div class="jump-host-toggle-row">
+            <label class="checkbox-label">
+              <input type="checkbox" id="chk-use-jump" />
+              <span>Connect through a Bastion / Jump Host (<code>ProxyJump</code>)</span>
+            </label>
+            <label class="checkbox-label">
+              <input type="checkbox" id="chk-save-profile" />
+              <span>Save to Encrypted Vault</span>
+            </label>
+          </div>
+
+          <div id="jump-host-fields" class="jump-host-box hidden">
+            <div class="form-row">
+              <div class="form-group flex-2">
+                <label for="jump-host">Bastion Host / IP</label>
+                <input id="jump-host" type="text" placeholder="127.0.0.1 or bastion.example.com" />
+              </div>
+              <div class="form-group flex-1">
+                <label for="jump-port">Port</label>
+                <input id="jump-port" type="number" value="2222" />
+              </div>
+              <div class="form-group flex-1">
+                <label for="jump-username">Bastion User</label>
+                <input id="jump-username" type="text" value="demo" />
+              </div>
+              <div class="form-group flex-1">
+                <label for="jump-password">Bastion Password</label>
+                <input id="jump-password" type="password" value="demo" />
+              </div>
+            </div>
+          </div>
+
+          <div id="connect-error" class="alert-error hidden"></div>
+
+          <div class="modal-footer">
+            <button type="button" id="btn-cancel-modal" class="btn btn-secondary">Cancel</button>
+            <button type="submit" id="btn-submit-connect" class="btn btn-primary">Connect via SSH</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- Feature 1: In-Browser Remote Code Editor & Live Log Tail Modal -->
+  <div id="editor-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="editor-modal-title">
+    <div class="modal-card modal-xl">
+      <div class="modal-header">
+        <div>
+          <h2 id="editor-modal-title">Remote File Editor</h2>
+          <code id="editor-file-path" class="editor-path-badge">/welcome.txt</code>
+        </div>
+        <div class="editor-header-actions">
+          <label class="checkbox-label">
+            <input type="checkbox" id="chk-live-tail" />
+            <span>🔄 Auto-Tail Live Log (2s)</span>
+          </label>
+          <span id="editor-save-status" class="save-status"></span>
+          <button id="btn-close-editor" class="icon-btn" aria-label="Close file editor">✕</button>
+        </div>
+      </div>
+      <div class="modal-body">
+        <div id="editor-image-preview" class="editor-image-preview hidden">
+          <img id="editor-img-el" alt="Remote file preview" />
+        </div>
+        <div id="editor-text-wrapper" class="editor-text-wrapper">
+          <textarea id="editor-textarea" spellcheck="false" aria-label="Remote file content editor"></textarea>
+        </div>
+        <div class="modal-footer">
+          <span class="muted-meta">Tip: Press <code>Ctrl+S</code> (or <code>Cmd+S</code>) to save directly over SFTP</span>
+          <div class="footer-btns">
+            <button type="button" id="btn-cancel-editor" class="btn btn-secondary">Close</button>
+            <button type="button" id="btn-save-editor" class="btn btn-emerald">💾 Save to Remote Server (SFTP)</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Quick File Composer Modal -->
+  <div id="compose-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="compose-modal-title">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h2 id="compose-modal-title">Create &amp; Transfer File to Remote Machine</h2>
+        <button id="btn-close-compose" class="icon-btn" aria-label="Close composer dialog">✕</button>
+      </div>
+      <div class="modal-body">
+        <form id="compose-file-form">
+          <div class="form-group">
+            <label for="compose-filename">Filename (relative to target path)</label>
+            <input id="compose-filename" type="text" value="deploy_script.sh" required />
+          </div>
+          <div class="form-group">
+            <label for="compose-content">File Content</label>
+            <textarea id="compose-content" rows="7" required>#!/usr/bin/env bash
+echo "Hello from WebSSH Studio SFTP upload!"
+date
+ls -la</textarea>
+          </div>
+          <div class="modal-footer">
+            <button type="button" id="btn-cancel-compose" class="btn btn-secondary">Cancel</button>
+            <button type="submit" class="btn btn-emerald">⬆️ Transfer File Now</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- Feature 4: ~/.ssh/config Importer Modal -->
+  <div id="ssh-config-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="ssh-config-modal-title">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h2 id="ssh-config-modal-title">Import Hosts from <code>~/.ssh/config</code></h2>
+        <button id="btn-close-ssh-config" class="icon-btn" aria-label="Close SSH config importer">✕</button>
+      </div>
+      <div class="modal-body">
+        <p class="modal-desc">Paste your OpenSSH config entries below (supports <code>Host</code>, <code>HostName</code>, <code>User</code>, <code>Port</code>, and <code>ProxyJump</code>).</p>
+        <div class="form-group">
+          <textarea id="ssh-config-textarea" rows="9" spellcheck="false"></textarea>
+        </div>
+        <div class="modal-footer">
+          <button type="button" id="btn-cancel-ssh-config" class="btn btn-secondary">Cancel</button>
+          <button type="button" id="btn-confirm-ssh-config" class="btn btn-primary">📥 Import into Vault</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

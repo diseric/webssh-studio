@@ -1,0 +1,8 @@
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+paramiko>=3.4.0
+asyncssh>=2.17.0
+psutil>=6.0.0
+cryptography>=42.0.0
+python-multipart>=0.0.12
+websockets>=13.0

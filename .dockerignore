@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+.git/
+.github/
+data/
+ui_backup_v1/
+vault.key
+profiles.json
+playbooks.json
+auth_config.json
+sandbox_host_key
+sandbox_remote_root/
+*.log

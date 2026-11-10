@@ -1,0 +1,107 @@
+[
+  {
+    "id": "pb-health-snapshot",
+    "name": "Full System Health Snapshot",
+    "category": "Diagnostics",
+    "description": "Kernel version, uptime/load average, memory usage, and disk space summary.",
+    "command": "uname -a && uptime && free -h && df -h"
+  },
+  {
+    "id": "pb-top-offenders",
+    "name": "Top CPU & Memory Offenders",
+    "category": "Diagnostics",
+    "description": "Lists the top CPU and memory consuming processes currently running.",
+    "command": "ps aux --sort=-%cpu | head -n 11"
+  },
+  {
+    "id": "pb-recent-errors",
+    "name": "Recent System & Service Errors",
+    "category": "Diagnostics",
+    "description": "Pulls recent error/warning entries from system logs and server.log.",
+    "command": "journalctl -p err -n 20 --no-pager"
+  },
+  {
+    "id": "pb-disk-hogs",
+    "name": "Find Largest Files & Folders",
+    "category": "Storage",
+    "description": "Scans current working directory for disk usage by file and folder.",
+    "command": "du -sh * && df -h"
+  },
+  {
+    "id": "pb-clean-temp",
+    "name": "Inspect & Clean Temp Workspace",
+    "category": "Storage",
+    "description": "Lists workspace files and verifies writable storage status.",
+    "command": "pwd && ls -la && stat welcome.txt"
+  },
+  {
+    "id": "pb-backup-snapshot",
+    "name": "Quick Timestamped Backup Archive",
+    "category": "Storage",
+    "description": "Creates a backups directory and archives configuration & log files.",
+    "command": "mkdir backups && tar -czf backups/config_snapshot.tar.gz app_config.json welcome.txt && ls -la backups"
+  },
+  {
+    "id": "pb-listening-ports",
+    "name": "Listening Ports & Active Sockets",
+    "category": "Networking",
+    "description": "Shows open TCP listening ports and bound server processes.",
+    "command": "ss -tulnp"
+  },
+  {
+    "id": "pb-net-latency",
+    "name": "Network Interface & DNS Check",
+    "category": "Networking",
+    "description": "Checks active network interfaces, routing, and loopback connectivity.",
+    "command": "ping -n 2 127.0.0.1"
+  },
+  {
+    "id": "pb-ssl-check",
+    "name": "TLS / Config Endpoint Audit",
+    "category": "Networking",
+    "description": "Inspects application TLS and port configuration in app_config.json.",
+    "command": "cat app_config.json"
+  },
+  {
+    "id": "pb-ssh-users",
+    "name": "Active SSH Users & Recent Logins",
+    "category": "Security",
+    "description": "Shows currently logged-in sessions, recent logins, and auth events.",
+    "command": "whoami && w && last -n 5"
+  },
+  {
+    "id": "pb-ssh-perms",
+    "name": "SSH Key & Permissions Audit",
+    "category": "Security",
+    "description": "Audits directory permissions and checks for exposed credential files.",
+    "command": "ls -la && stat app_config.json"
+  },
+  {
+    "id": "pb-world-writable",
+    "name": "World-Writable & Config Integrity Check",
+    "category": "Security",
+    "description": "Scans workspace files and prints recent security warnings from server.log.",
+    "command": "cat server.log"
+  },
+  {
+    "id": "pb-docker-status",
+    "name": "Docker Container & Resource Status",
+    "category": "Containers & Git",
+    "description": "Lists running containers and resource utilization snapshot.",
+    "command": "docker ps && docker stats --no-stream"
+  },
+  {
+    "id": "pb-systemd-failed",
+    "name": "Failed Systemd Services Check",
+    "category": "Containers & Git",
+    "description": "Checks service manager health and lists any degraded units.",
+    "command": "systemctl --failed"
+  },
+  {
+    "id": "pb-git-status",
+    "name": "Git Repo Status & Recent Commits",
+    "category": "Containers & Git",
+    "description": "Displays current branch status and latest commit history.",
+    "command": "git status -sb || ls -la"
+  }
+]

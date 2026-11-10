@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+.env
+data/
+vault.key
+profiles.json
+auth_config.json
+sandbox_host_key
+sandbox_remote_root/
+*.log

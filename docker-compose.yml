@@ -1,0 +1,20 @@
+services:
+  webssh-studio:
+    build: .
+    image: webssh-studio:latest
+    container_name: webssh-studio
+    restart: unless-stopped
+    ports:
+      - "8090:8090"
+      # Optional: Expose the built-in local SSH2 + SFTP sandbox server
+      - "2222:2222"
+    environment:
+      - WEBSSH_HOST=0.0.0.0
+      - WEBSSH_PORT=8090
+      - WEBSSH_DATA_DIR=/data
+      # Optional: Set an initial master password for the Web UI (can also be configured in the UI)
+      - WEBSSH_APP_PASSWORD=${WEBSSH_APP_PASSWORD:-}
+      # Optional: Set to true when behind Authentik, Authelia, or Cloudflare Zero Trust
+      - WEBSSH_TRUST_PROXY_HEADERS=${WEBSSH_TRUST_PROXY_HEADERS:-false}
+    volumes:
+      - ./data:/data
