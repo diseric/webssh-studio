@@ -10,17 +10,14 @@ import posixpath
 import secrets
 import shutil
 import stat
-import subprocess
 import time
 import uuid
 import zipfile
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional
 
-import asyncssh
 import paramiko
-import psutil
 from cryptography.fernet import Fernet
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -36,62 +33,16 @@ STATIC_DIR.mkdir(parents=True, exist_ok=True)
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 # Migrate legacy root files into DATA_DIR seamlessly if they exist
-for legacy_name in ("vault.key", "profiles.json", "playbooks.json", "sandbox_host_key"):
+for legacy_name in ("vault.key", "profiles.json", "playbooks.json"):
     legacy_file = BASE_DIR / legacy_name
     target_file = DATA_DIR / legacy_name
     if legacy_file.exists() and not target_file.exists():
         shutil.copy2(legacy_file, target_file)
 
-SANDBOX_ROOT = DATA_DIR / "sandbox_remote_root"
-if (BASE_DIR / "sandbox_remote_root").exists() and not SANDBOX_ROOT.exists():
-    shutil.copytree(BASE_DIR / "sandbox_remote_root", SANDBOX_ROOT)
-SANDBOX_ROOT.mkdir(parents=True, exist_ok=True)
-
-HOST_KEY_PATH = DATA_DIR / "sandbox_host_key"
 VAULT_KEY_PATH = DATA_DIR / "vault.key"
 PROFILES_PATH = DATA_DIR / "profiles.json"
 PLAYBOOKS_PATH = DATA_DIR / "playbooks.json"
 AUTH_CONFIG_PATH = DATA_DIR / "auth_config.json"
-
-# Seed sample files in sandbox_remote_root for immediate testing of Editor, Log Tail, and SFTP
-welcome_file = SANDBOX_ROOT / "welcome.txt"
-if not welcome_file.exists():
-    welcome_file.write_text(
-        "Welcome to the WebSSH Studio Sandbox Server!\n"
-        "You can drag and drop files into the transfer zone in your browser,\n"
-        "edit remote files in the built-in code editor, monitor live telemetry,\n"
-        "or configure SSH port forwarding tunnels.\n",
-        encoding="utf-8",
-    )
-
-sample_cfg = SANDBOX_ROOT / "app_config.json"
-if not sample_cfg.exists():
-    sample_cfg.write_text(
-        json.dumps(
-            {
-                "service": "webssh-edge-proxy",
-                "environment": "production",
-                "listen_port": 8080,
-                "workers": 4,
-                "tls_enabled": True,
-                "allowed_Subnets": ["10.0.0.0/8", "192.168.1.0/24"],
-            },
-            indent=2,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-
-sample_log = SANDBOX_ROOT / "server.log"
-if not sample_log.exists():
-    sample_log.write_text(
-        "[2026-11-10 11:00:01] INFO  Starting sshd-sandbox listener on 127.0.0.1:2222\n"
-        "[2026-11-10 11:05:14] INFO  SFTP subsystem initialized (chroot=/sandbox_remote_root)\n"
-        "[2026-11-10 11:12:40] INFO  Health check passed: CPU OK, Memory OK, Disk OK\n"
-        "[2026-11-10 11:20:00] WARN  High connection rate detected from 10.24.0.12\n"
-        "[2026-11-10 11:28:19] INFO  Worker pool scaled to 4 instances\n",
-        encoding="utf-8",
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -120,27 +71,15 @@ def _decrypt_secret(token: Optional[str]) -> str:
 
 def load_profiles() -> List[dict]:
     if not PROFILES_PATH.exists():
-        default_profiles = [
-            {
-                "id": "sandbox-local",
-                "name": "Local SSH Sandbox",
-                "tag": "Sandbox",
-                "host": "127.0.0.1",
-                "port": 2222,
-                "username": "demo",
-                "auth_type": "password",
-                "encrypted_password": _encrypt_secret("demo"),
-                "encrypted_key": "",
-                "encrypted_passphrase": "",
-                "use_jump_host": False,
-                "jump_host": "",
-                "jump_port": 22,
-                "jump_username": "",
-            }
-        ]
-        PROFILES_PATH.write_text(json.dumps(default_profiles, indent=2), encoding="utf-8")
+        PROFILES_PATH.write_text("[]\n", encoding="utf-8")
+        return []
     try:
-        return json.loads(PROFILES_PATH.read_text(encoding="utf-8"))
+        data = json.loads(PROFILES_PATH.read_text(encoding="utf-8"))
+        # Filter out any legacy sandbox profile if present
+        cleaned = [p for p in data if p.get("id") != "sandbox-local"]
+        if len(cleaned) != len(data):
+            save_profiles(cleaned)
+        return cleaned
     except Exception:
         return []
 
@@ -169,74 +108,74 @@ DEFAULT_PLAYBOOKS = [
         "id": "pb-recent-errors",
         "name": "Recent System & Service Errors",
         "category": "Diagnostics",
-        "description": "Pulls the last {{lines:20}} error/warning entries from system logs.",
-        "command": "journalctl -p err -n {{lines:20}} --no-pager",
+        "description": "Pulls the last {{lines:25}} error/warning entries from systemd journal.",
+        "command": "journalctl -p err -n {{lines:25}} --no-pager",
     },
     # 2. Storage
     {
         "id": "pb-disk-hogs",
         "name": "Find Largest Files & Folders",
         "category": "Storage",
-        "description": "Scans {{target_path:*}} for disk usage by file and folder.",
-        "command": "du -sh {{target_path:*}} && df -h",
+        "description": "Scans {{target_path:.}} for disk usage sorted largest-first.",
+        "command": "du -sh {{target_path:.}}/* 2>/dev/null | sort -hr | head -n {{limit:15}}",
     },
     {
         "id": "pb-clean-temp",
-        "name": "Inspect File Metadata",
+        "name": "Inspect File Metadata & Inodes",
         "category": "Storage",
-        "description": "Lists workspace files and inspects metadata for {{target_file:welcome.txt}}.",
-        "command": "pwd && ls -la && stat {{target_file:welcome.txt}}",
+        "description": "Lists directory contents and checks inode usage across mounted filesystems.",
+        "command": "pwd && ls -la && df -i",
     },
     {
         "id": "pb-backup-snapshot",
-        "name": "Quick Timestamped Backup Archive",
+        "name": "Quick Timestamped Directory Backup",
         "category": "Storage",
-        "description": "Creates a backups directory and archives files into {{archive_name:config_snapshot.tar.gz}}.",
-        "command": "mkdir backups && tar -czf backups/{{archive_name:config_snapshot.tar.gz}} app_config.json welcome.txt && ls -la backups",
+        "description": "Compresses {{source_dir:.}} into {{archive_name:backup_snapshot.tar.gz}}.",
+        "command": "tar -czf {{archive_name:backup_snapshot.tar.gz}} {{source_dir:.}} && ls -lh {{archive_name:backup_snapshot.tar.gz}}",
     },
     # 3. Networking
     {
         "id": "pb-listening-ports",
         "name": "Listening Ports & Active Sockets",
         "category": "Networking",
-        "description": "Shows open TCP listening ports and bound server processes.",
+        "description": "Shows open TCP/UDP listening ports and bound server processes.",
         "command": "ss -tulnp",
     },
     {
         "id": "pb-net-latency",
         "name": "Network Ping & Latency Check",
         "category": "Networking",
-        "description": "Pings {{target_host:127.0.0.1}} to verify routing and latency.",
-        "command": "ping -n {{count:2}} {{target_host:127.0.0.1}}",
+        "description": "Pings {{target_host:1.1.1.1}} to verify outbound routing and latency.",
+        "command": "ping -c {{count:3}} {{target_host:1.1.1.1}}",
     },
     {
         "id": "pb-ssl-check",
-        "name": "TLS / Config Endpoint Audit",
+        "name": "TLS Certificate Expiry Audit",
         "category": "Networking",
-        "description": "Inspects application configuration in {{config_file:app_config.json}}.",
-        "command": "cat {{config_file:app_config.json}}",
+        "description": "Checks TLS certificate expiration dates for {{domain_port:localhost:443}}.",
+        "command": "openssl s_client -connect {{domain_port:localhost:443}} </dev/null 2>/dev/null | openssl x509 -noout -dates",
     },
     # 4. Security
     {
         "id": "pb-ssh-users",
         "name": "Active SSH Users & Recent Logins",
         "category": "Security",
-        "description": "Shows currently logged-in sessions and last {{login_count:5}} logins.",
-        "command": "whoami && w && last -n {{login_count:5}}",
+        "description": "Shows currently logged-in sessions and last {{login_count:10}} logins.",
+        "command": "whoami && w && last -n {{login_count:10}}",
     },
     {
         "id": "pb-ssh-perms",
         "name": "SSH Key & Permissions Audit",
         "category": "Security",
-        "description": "Audits directory permissions and checks {{audit_file:app_config.json}}.",
-        "command": "ls -la && stat {{audit_file:app_config.json}}",
+        "description": "Audits ~/.ssh directory permissions and authorized_keys configuration.",
+        "command": "ls -la ~/.ssh && stat ~/.ssh/authorized_keys 2>/dev/null || true",
     },
     {
         "id": "pb-world-writable",
-        "name": "Security Log & Config Integrity Check",
+        "name": "Failed SSH Login & Auth Log Audit",
         "category": "Security",
-        "description": "Prints security and access events from {{log_file:server.log}}.",
-        "command": "cat {{log_file:server.log}}",
+        "description": "Checks recent authentication events in {{auth_log:/var/log/auth.log}}.",
+        "command": "tail -n {{lines:25}} {{auth_log:/var/log/auth.log}} 2>/dev/null || journalctl -u ssh -n {{lines:25}} --no-pager",
     },
     # 5. Containers & Git
     {
@@ -244,7 +183,7 @@ DEFAULT_PLAYBOOKS = [
         "name": "Docker Container & Resource Status",
         "category": "Containers & Git",
         "description": "Lists running containers and resource utilization snapshot.",
-        "command": "docker ps && docker stats --no-stream",
+        "command": "docker ps -a && docker stats --no-stream",
     },
     {
         "id": "pb-systemd-failed",
@@ -257,8 +196,8 @@ DEFAULT_PLAYBOOKS = [
         "id": "pb-git-status",
         "name": "Git Repo Status & Recent Commits",
         "category": "Containers & Git",
-        "description": "Displays current branch status and latest commit history.",
-        "command": "git status -sb || ls -la",
+        "description": "Displays current branch status and latest {{commit_count:5}} commits.",
+        "command": "git status -sb && git log --oneline -n {{commit_count:5}}",
     },
 ]
 
@@ -268,12 +207,7 @@ def load_playbooks() -> List[dict]:
         PLAYBOOKS_PATH.write_text(json.dumps(DEFAULT_PLAYBOOKS, indent=2), encoding="utf-8")
         return list(DEFAULT_PLAYBOOKS)
     try:
-        data = json.loads(PLAYBOOKS_PATH.read_text(encoding="utf-8"))
-        # Automatically upgrade default playbooks if none of them have parameterized {{...}} syntax yet
-        if data and not any("{{" in p.get("command", "") for p in data):
-            PLAYBOOKS_PATH.write_text(json.dumps(DEFAULT_PLAYBOOKS, indent=2), encoding="utf-8")
-            return list(DEFAULT_PLAYBOOKS)
-        return data
+        return json.loads(PLAYBOOKS_PATH.read_text(encoding="utf-8"))
     except Exception:
         return list(DEFAULT_PLAYBOOKS)
 
@@ -285,7 +219,7 @@ def save_playbooks(playbooks: List[dict]):
 # ---------------------------------------------------------------------------
 # App-Level Authentication & Reverse-Proxy SSO Support
 # ---------------------------------------------------------------------------
-AUTH_TOKENS: Dict[str, float] = {}  # token -> expiry timestamp
+AUTH_TOKENS: Dict[str, float] = {}
 
 
 def _hash_password(password: str, salt: str) -> str:
@@ -345,7 +279,6 @@ def _extract_proxy_user(headers) -> Optional[str]:
 
 
 def _is_request_authenticated(request: Request) -> tuple[bool, Optional[str], str]:
-    """Returns (authenticated, username, mode)."""
     cfg = load_auth_config()
     proxy_user = _extract_proxy_user(request.headers)
     if proxy_user:
@@ -365,436 +298,6 @@ def _is_request_authenticated(request: Request) -> tuple[bool, Optional[str], st
     if exp and exp > now:
         return True, "admin", "password"
     return False, None, "password"
-
-
-# ---------------------------------------------------------------------------
-# Embedded Local SSH + SFTP Server (127.0.0.1:2222)
-# ---------------------------------------------------------------------------
-class SandboxSFTPServer(asyncssh.SFTPServer):
-    def __init__(self, chan):
-        super().__init__(chan, chroot=str(SANDBOX_ROOT))
-
-
-class SandboxSSHServer(asyncssh.SSHServer):
-    def connection_made(self, conn):
-        self._conn = conn
-
-    def begin_auth(self, username):
-        return True
-
-    def password_auth_supported(self):
-        return True
-
-    def validate_password(self, username, password):
-        return len(password) > 0
-
-
-async def handle_sandbox_process(process: asyncssh.SSHServerProcess):
-    """Interactive PTY shell + exec handler for the embedded local SSH server on 127.0.0.1:2222."""
-    user = process.get_extra_info("username") or "demo"
-    cwd = SANDBOX_ROOT
-
-    def sftp_path(p: Path) -> str:
-        try:
-            rel = p.resolve().relative_to(SANDBOX_ROOT.resolve())
-            return "/" if str(rel) == "." else f"/{rel.as_posix()}"
-        except ValueError:
-            return "/"
-
-    def rel_path(p: Path) -> str:
-        try:
-            rel = p.resolve().relative_to(SANDBOX_ROOT.resolve())
-            return "~" if str(rel) == "." else f"~/{rel.as_posix()}"
-        except ValueError:
-            return "~"
-
-    def safe_resolve(target: str) -> Path:
-        if not target or target == "~":
-            return SANDBOX_ROOT.resolve()
-        if target.startswith("~/"):
-            target = target[2:]
-            cand = (SANDBOX_ROOT / target).resolve()
-        elif target.startswith("/"):
-            cand = (SANDBOX_ROOT / target.lstrip("/")).resolve()
-        else:
-            cand = (cwd / target).resolve()
-        try:
-            cand.relative_to(SANDBOX_ROOT.resolve())
-            return cand
-        except ValueError:
-            return SANDBOX_ROOT.resolve()
-
-    def write_out(text: str):
-        process.stdout.write(text.replace("\r\n", "\n").replace("\n", "\r\n"))
-
-    def emit_osc7():
-        # OSC 7 escape sequence so browser knows the remote working directory changed!
-        process.stdout.write(f"\x1b]7;file://sandbox-ssh{sftp_path(cwd)}\x07")
-
-    def prompt_str() -> str:
-        return f"\x1b[1;32m{user}@sandbox-ssh\x1b[0m:\x1b[1;34m{rel_path(cwd)}\x1b[0m$ "
-
-    def run_single_command(cmd_line: str):
-        nonlocal cwd
-        cmd_line = cmd_line.strip()
-        if not cmd_line:
-            return
-        parts = cmd_line.split()
-        cmd = parts[0]
-        args = parts[1:]
-
-        if cmd in ("exit", "logout"):
-            write_out("logout\n")
-            process.exit(0)
-            return
-        elif cmd == "clear":
-            process.stdout.write("\x1b[2J\x1b[H")
-            return
-        elif cmd == "help":
-            write_out(
-                "Available built-in & shell commands:\n"
-                "  ls [-la] [dir]     List directory contents\n"
-                "  cd <dir>           Change current directory (auto-syncs SFTP browser!)\n"
-                "  pwd                Print working directory\n"
-                "  cat <file>         Display file contents\n"
-                "  mkdir <dir>        Create directory\n"
-                "  rm [-rf] <path>    Remove file or directory\n"
-                "  touch <file>       Create empty file\n"
-                "  echo <text>        Print text (supports > file)\n"
-                "  stat <file>        Show file metadata\n"
-                "  whoami / uname -a  Show session & system info\n"
-                "  clear              Clear terminal screen\n"
-                "  exit               Disconnect SSH session\n"
-            )
-            return
-        elif cmd == "pwd":
-            write_out(sftp_path(cwd) + "\n")
-            return
-        elif cmd == "whoami":
-            write_out(f"{user}\n")
-            return
-        elif cmd == "uname":
-            write_out("Linux sandbox-ssh 6.8.0-webssh #1 SMP PREEMPT_DYNAMIC x86_64 GNU/Linux\n")
-            return
-        elif cmd == "uptime":
-            up_sec = int(time.time() - psutil.boot_time())
-            hrs, rem = divmod(up_sec, 3600)
-            mins, _ = divmod(rem, 60)
-            cpu_load = round(psutil.cpu_percent(interval=0.05) / 25.0, 2)
-            write_out(
-                f" {time.strftime('%H:%M:%S')} up {hrs}:{mins:02d},  1 user,  load average: {cpu_load:.2f}, {max(0.1, cpu_load - 0.08):.2f}, {max(0.05, cpu_load - 0.15):.2f}\n"
-            )
-            return
-        elif cmd == "free":
-            vm = psutil.virtual_memory()
-            tot_g = vm.total / (1024 ** 3)
-            used_g = vm.used / (1024 ** 3)
-            free_g = vm.available / (1024 ** 3)
-            write_out(
-                "               total        used        free      shared  buff/cache   available\n"
-                f"Mem:          {tot_g:5.1f}Gi     {used_g:5.1f}Gi     {free_g:5.1f}Gi       0.1Gi       1.2Gi     {free_g:5.1f}Gi\n"
-                "Swap:          4.0Gi       0.0Gi       4.0Gi\n"
-            )
-            return
-        elif cmd == "df":
-            du = shutil.disk_usage(str(SANDBOX_ROOT))
-            tot_g = du.total / (1024 ** 3)
-            used_g = du.used / (1024 ** 3)
-            avail_g = du.free / (1024 ** 3)
-            pct = int(round((du.used / max(1, du.total)) * 100))
-            write_out(
-                "Filesystem      Size  Used Avail Use% Mounted on\n"
-                f"/dev/nvme0n1p1 {tot_g:4.0f}G {used_g:4.0f}G {avail_g:4.0f}G  {pct}% /\n"
-            )
-            return
-        elif cmd == "du":
-            items = sorted(cwd.iterdir(), key=lambda p: p.name.lower())
-            for item in items:
-                if item.is_dir():
-                    sz = sum(f.stat().st_size for f in item.rglob("*") if f.is_file())
-                else:
-                    sz = item.stat().st_size
-                kb = max(1, (sz + 1023) // 1024)
-                write_out(f"{kb}K\t{item.name}\n")
-            return
-        elif cmd == "ps":
-            write_out("USER         PID %CPU %MEM    COMMAND\n")
-            procs = []
-            for p in psutil.process_iter(["pid", "name", "cpu_percent", "memory_percent"]):
-                try:
-                    info = p.info
-                    if info["name"]:
-                        procs.append(info)
-                except Exception:
-                    continue
-            procs.sort(key=lambda x: (x.get("memory_percent") or 0.0), reverse=True)
-            for info in procs[:10]:
-                write_out(
-                    f"{user:<10} {info['pid']:>5} {float(info.get('cpu_percent') or 0.0):>4.1f} {float(info.get('memory_percent') or 0.0):>4.1f}    {info['name']}\n"
-                )
-            return
-        elif cmd in ("ss", "netstat"):
-            write_out(
-                "Netid  State   Recv-Q  Send-Q   Local Address:Port    Peer Address:Port  Process\n"
-                "tcp    LISTEN  0       128      127.0.0.1:2222        0.0.0.0:*          users:((\"sshd-sandbox\",pid=1042,fd=3))\n"
-                "tcp    LISTEN  0       128      127.0.0.1:8090        0.0.0.0:*          users:((\"webssh-studio\",pid=1001,fd=6))\n"
-            )
-            return
-        elif cmd == "w":
-            write_out(
-                f"USER     TTY      FROM             LOGIN@   IDLE   WHAT\n"
-                f"{user:<8} pts/0    127.0.0.1        {time.strftime('%H:%M')}    0.00s  -bash\n"
-            )
-            return
-        elif cmd == "last":
-            write_out(
-                f"{user:<8} pts/0    127.0.0.1        {time.strftime('%a %b %d %H:%M')}   still logged in\n"
-            )
-            return
-        elif cmd == "journalctl":
-            log_p = SANDBOX_ROOT / "server.log"
-            if log_p.exists():
-                write_out(log_p.read_text(encoding="utf-8", errors="replace"))
-            else:
-                write_out("-- No error entries found in journal --\n")
-            return
-        elif cmd == "systemctl":
-            write_out("  UNIT LOAD ACTIVE SUB DESCRIPTION\n0 loaded units listed. Pass --all to see loaded but inactive units.\n")
-            return
-        elif cmd == "docker":
-            if args and args[0] == "stats":
-                write_out(
-                    "CONTAINER ID   NAME                CPU %     MEM USAGE / LIMIT     MEM %     NET I/O\n"
-                    "a1b2c3d4e5f6   webssh-edge-proxy   0.45%     48.2MiB / 2.0GiB      2.35%     1.4MB / 890kB\n"
-                )
-            else:
-                write_out(
-                    "CONTAINER ID   IMAGE                    COMMAND                  STATUS          PORTS                    NAMES\n"
-                    "a1b2c3d4e5f6   nginx:1.27-alpine        \"/docker-entrypoint.…\"   Up 4 hours      0.0.0.0:8080->80/tcp     webssh-edge-proxy\n"
-                )
-            return
-        elif cmd == "cd":
-            target = args[0] if args else "~"
-            dest = safe_resolve(target)
-            if not dest.exists():
-                write_out(f"bash: cd: {target}: No such file or directory\n")
-            elif not dest.is_dir():
-                write_out(f"bash: cd: {target}: Not a directory\n")
-            else:
-                cwd = dest
-                emit_osc7()
-            return
-        elif cmd == "ls":
-            long_fmt = any(a.startswith("-") and "l" in a for a in args)
-            targets = [a for a in args if not a.startswith("-")]
-            target_dir = safe_resolve(targets[0]) if targets else cwd
-            if not target_dir.exists():
-                write_out(f"ls: cannot access '{targets[0]}': No such file or directory\n")
-                return
-            if target_dir.is_file():
-                write_out(f"{target_dir.name}\n")
-                return
-            items = sorted(target_dir.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
-            if long_fmt:
-                write_out(f"total {len(items)}\n")
-                for item in items:
-                    st = item.stat()
-                    mode = "drwxr-xr-x" if item.is_dir() else "-rw-r--r--"
-                    mtime = time.strftime("%b %d %H:%M", time.localtime(st.st_mtime))
-                    name_disp = f"\x1b[1;34m{item.name}/\x1b[0m" if item.is_dir() else item.name
-                    write_out(f"{mode} 1 {user} {user} {st.st_size:>8} {mtime} {name_disp}\n")
-            else:
-                names = [
-                    f"\x1b[1;34m{item.name}/\x1b[0m" if item.is_dir() else item.name
-                    for item in items
-                ]
-                write_out("  ".join(names) + ("\n" if names else ""))
-            return
-        elif cmd == "cat":
-            if not args:
-                write_out("cat: missing file operand\n")
-                return
-            for arg in args:
-                clean_arg = arg.strip("'\"")
-                f = safe_resolve(clean_arg)
-                if not f.exists():
-                    write_out(f"cat: {clean_arg}: No such file or directory\n")
-                elif f.is_dir():
-                    write_out(f"cat: {clean_arg}: Is a directory\n")
-                else:
-                    try:
-                        content = f.read_text(encoding="utf-8", errors="replace")
-                        write_out(content)
-                        if not content.endswith("\n"):
-                            write_out("\n")
-                    except Exception as exc:
-                        write_out(f"cat: {clean_arg}: {exc}\n")
-            return
-        elif cmd == "mkdir":
-            dirs = [a for a in args if not a.startswith("-")]
-            if not dirs:
-                write_out("mkdir: missing operand\n")
-                return
-            for d in dirs:
-                dest = safe_resolve(d)
-                dest.mkdir(parents=True, exist_ok=True)
-            return
-        elif cmd == "touch":
-            if not args:
-                write_out("touch: missing file operand\n")
-                return
-            for f_arg in args:
-                dest = safe_resolve(f_arg)
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                dest.touch()
-            return
-        elif cmd == "rm":
-            targets = [a for a in args if not a.startswith("-")]
-            recursive = any("r" in a.lower() for a in args if a.startswith("-"))
-            if not targets:
-                write_out("rm: missing operand\n")
-                return
-            for t in targets:
-                dest = safe_resolve(t)
-                if dest == SANDBOX_ROOT.resolve():
-                    write_out("rm: cannot remove root directory\n")
-                    continue
-                if not dest.exists():
-                    write_out(f"rm: cannot remove '{t}': No such file or directory\n")
-                elif dest.is_dir():
-                    if recursive:
-                        shutil.rmtree(dest)
-                    else:
-                        write_out(f"rm: cannot remove '{t}': Is a directory (use -rf)\n")
-                else:
-                    dest.unlink()
-            return
-        elif cmd == "stat":
-            if not args:
-                write_out("stat: missing operand\n")
-                return
-            dest = safe_resolve(args[0])
-            if not dest.exists():
-                write_out(f"stat: cannot statx '{args[0]}': No such file or directory\n")
-                return
-            st = dest.stat()
-            write_out(
-                f"  File: {dest.name}\n"
-                f"  Size: {st.st_size}\tType: {'directory' if dest.is_dir() else 'regular file'}\n"
-                f"Modify: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(st.st_mtime))}\n"
-            )
-            return
-        elif cmd == "echo":
-            if ">" in args:
-                idx = args.index(">")
-                text = " ".join(args[:idx]).strip("'\"")
-                if idx + 1 < len(args):
-                    dest = safe_resolve(args[idx + 1])
-                    dest.parent.mkdir(parents=True, exist_ok=True)
-                    dest.write_text(text + "\n", encoding="utf-8")
-                    return
-            write_out(" ".join(args).strip("'\"") + "\n")
-            return
-        else:
-            try:
-                res = subprocess.run(
-                    cmd_line,
-                    shell=True,
-                    cwd=str(cwd),
-                    capture_output=True,
-                    text=True,
-                    timeout=10,
-                )
-                if res.stdout:
-                    write_out(res.stdout)
-                if res.stderr:
-                    write_out(res.stderr)
-            except Exception as exc:
-                write_out(f"{cmd}: error executing command: {exc}\n")
-
-    def run_command_chain(cmd_line: str):
-        for sub in cmd_line.split("&&"):
-            run_single_command(sub)
-
-    # Support non-interactive exec_command
-    if process.command:
-        run_command_chain(process.command)
-        process.exit(0)
-        return
-
-    write_out(
-        "\x1b[1;36m============================================================\x1b[0m\n"
-        "\x1b[1;36m  WebSSH Studio — Local SSH2 + SFTP Sandbox (127.0.0.1:2222)\x1b[0m\n"
-        "\x1b[1;36m============================================================\x1b[0m\n"
-        f"Connected as \x1b[1;33m{user}\x1b[0m via SSH-2.0. SFTP root: ~/ ({SANDBOX_ROOT.name})\n"
-        "Type \x1b[1;32mhelp\x1b[0m, \x1b[1;32mls -la\x1b[0m, \x1b[1;32mcat <file>\x1b[0m, or drop files in the UI!\n\n"
-    )
-    emit_osc7()
-    process.stdout.write(prompt_str())
-
-    line_buf: List[str] = []
-    history: List[str] = []
-    hist_idx = 0
-
-    def redraw_line(new_text: str):
-        process.stdout.write("\r\x1b[2K" + prompt_str() + new_text)
-
-    try:
-        while not process.stdin.at_eof():
-            data = await process.stdin.read(1024)
-            if not data:
-                break
-            i = 0
-            while i < len(data):
-                ch = data[i]
-                if ch == "\x1b" and i + 2 < len(data) and data[i + 1] == "[":
-                    code = data[i + 2]
-                    if code == "A":
-                        if history and hist_idx > 0:
-                            hist_idx -= 1
-                            line_buf = list(history[hist_idx])
-                            redraw_line("".join(line_buf))
-                    elif code == "B":
-                        if hist_idx < len(history) - 1:
-                            hist_idx += 1
-                            line_buf = list(history[hist_idx])
-                            redraw_line("".join(line_buf))
-                        else:
-                            hist_idx = len(history)
-                            line_buf = []
-                            redraw_line("")
-                    i += 3
-                    continue
-                if ch in ("\r", "\n"):
-                    write_out("\n")
-                    cmd_str = "".join(line_buf)
-                    line_buf.clear()
-                    if cmd_str.strip():
-                        history.append(cmd_str)
-                        hist_idx = len(history)
-                    run_command_chain(cmd_str)
-                    if not process.is_closing():
-                        process.stdout.write(prompt_str())
-                    if ch == "\r" and i + 1 < len(data) and data[i + 1] == "\n":
-                        i += 1
-                elif ch in ("\x7f", "\b"):
-                    if line_buf:
-                        line_buf.pop()
-                        process.stdout.write("\b \b")
-                elif ch == "\x03":
-                    line_buf.clear()
-                    write_out("^C\n")
-                    process.stdout.write(prompt_str())
-                elif ch == "\x0c":
-                    process.stdout.write("\x1b[2J\x1b[H" + prompt_str() + "".join(line_buf))
-                elif ord(ch) >= 32 or ch == "\t":
-                    line_buf.append(ch)
-                    process.stdout.write(ch)
-                i += 1
-    except (asyncssh.BreakReceived, asyncssh.TerminalSizeChanged, asyncssh.SignalReceived):
-        pass
-    except Exception:
-        pass
 
 
 # ---------------------------------------------------------------------------
@@ -901,8 +404,6 @@ class SSHSession:
 
 
 SESSIONS: Dict[str, SSHSession] = {}
-SANDBOX_SERVER = None
-SANDBOX_PORT = 2222
 
 
 # ---------------------------------------------------------------------------
@@ -917,7 +418,6 @@ class ConnectRequest(BaseModel):
     private_key: Optional[str] = None
     passphrase: Optional[str] = None
     profile_id: Optional[str] = None
-    # Jump Host / Bastion (ProxyJump) support
     use_jump_host: bool = False
     jump_host: Optional[str] = None
     jump_port: int = 22
@@ -991,39 +491,14 @@ class AuthSetupRequest(BaseModel):
 # ---------------------------------------------------------------------------
 # FastAPI Lifespan & App Initialization
 # ---------------------------------------------------------------------------
-async def ensure_sandbox_server():
-    global SANDBOX_SERVER
-    if SANDBOX_SERVER is not None:
-        return
-    if not HOST_KEY_PATH.exists():
-        key = asyncssh.generate_private_key("ssh-rsa")
-        HOST_KEY_PATH.write_bytes(key.export_private_key())
-    try:
-        SANDBOX_SERVER = await asyncssh.create_server(
-            SandboxSSHServer,
-            "127.0.0.1",
-            SANDBOX_PORT,
-            server_host_keys=[str(HOST_KEY_PATH)],
-            process_factory=handle_sandbox_process,
-            sftp_factory=SandboxSFTPServer,
-            encoding="utf-8",
-        )
-    except Exception as exc:
-        print(f"[Warning] Could not bind sandbox SSH server on {SANDBOX_PORT}: {exc}")
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await ensure_sandbox_server()
     load_profiles()
     load_playbooks()
     yield
     for s in list(SESSIONS.values()):
         s.close()
     SESSIONS.clear()
-    if SANDBOX_SERVER:
-        SANDBOX_SERVER.close()
-        await SANDBOX_SERVER.wait_closed()
 
 
 app = FastAPI(title="WebSSH & SFTP Studio", lifespan=lifespan)
@@ -1070,7 +545,7 @@ async def login_app(req: AuthLoginRequest, response: Response):
         raise HTTPException(status_code=401, detail="Invalid master password.")
 
     token = secrets.token_urlsafe(32)
-    AUTH_TOKENS[token] = time.time() + 86400 * 7  # 7 days
+    AUTH_TOKENS[token] = time.time() + 86400 * 7
     response.set_cookie(
         key="webssh_token",
         value=token,
@@ -1093,7 +568,6 @@ async def logout_app(request: Request, response: Response):
 @app.post("/api/auth/setup")
 async def setup_app_auth(req: AuthSetupRequest, request: Request, response: Response):
     cfg = load_auth_config()
-    # If already enabled, require either active auth session or matching current_password
     if cfg.get("enabled") and cfg.get("password_hash"):
         authed, _, _ = _is_request_authenticated(request)
         if not authed:
@@ -1141,7 +615,6 @@ def _parse_private_key(raw_key: Optional[str], passphrase: Optional[str] = None)
 
 
 def _connect_paramiko(req: ConnectRequest) -> SSHSession:
-    # Populate credentials from encrypted profile vault if profile_id is supplied
     password = req.password
     private_key = req.private_key
     passphrase = req.passphrase
@@ -1228,23 +701,14 @@ def _connect_paramiko(req: ConnectRequest) -> SSHSession:
 
 @app.get("/api/info")
 async def get_info():
-    await ensure_sandbox_server()
     return {
-        "sandbox_available": SANDBOX_SERVER is not None,
-        "sandbox_host": "127.0.0.1",
-        "sandbox_port": SANDBOX_PORT,
-        "sandbox_user": "demo",
-        "sandbox_pass": "demo",
+        "status": "ok",
         "active_sessions": len(SESSIONS),
     }
 
 
 @app.post("/api/sessions")
 async def create_session(req: ConnectRequest):
-    if req.host in ("127.0.0.1", "localhost") and (
-        req.port == SANDBOX_PORT or (req.use_jump_host and req.jump_port == SANDBOX_PORT)
-    ):
-        await ensure_sandbox_server()
     try:
         session = await asyncio.to_thread(_connect_paramiko, req)
         SESSIONS[session.session_id] = session
@@ -1415,7 +879,6 @@ async def download_remote_zip(session_id: str, path: str = Query(default="/")):
                 if stat.S_ISDIR(attr.st_mode or 0):
                     _walk_and_add(full_p, arc_name, zf)
                 else:
-                    # Skip overly huge files > 25MB in zip archive
                     if (attr.st_size or 0) <= 25 * 1024 * 1024:
                         fbuf = io.BytesIO()
                         sftp.getfo(full_p, fbuf)
@@ -1435,7 +898,7 @@ async def download_remote_zip(session_id: str, path: str = Query(default="/")):
 
     try:
         zbuf = await asyncio.to_thread(_build_zip)
-        base_name = posixpath.basename(path.rstrip("/")) or "remote_root"
+        base_name = posixpath.basename(path.rstrip("/")) or "remote_archive"
         return StreamingResponse(
             zbuf,
             media_type="application/zip",
@@ -1621,37 +1084,44 @@ async def reset_default_playbooks():
 # Feature 3: Live Server Telemetry HUD & Process Inspector
 # ---------------------------------------------------------------------------
 def _collect_telemetry(session: SSHSession) -> dict:
-    # If connected to the local sandbox (or localhost), collect live host telemetry via psutil
-    # while also supporting remote Linux SSH telemetry via /proc and ps!
-    is_local_sandbox = session.host in ("127.0.0.1", "localhost") and session.port == SANDBOX_PORT
-
-    if not is_local_sandbox:
-        try:
-            _, stdout, _ = session.client.exec_command(
-                "cat /proc/loadavg 2>/dev/null; free -b 2>/dev/null; df -B1 / 2>/dev/null | tail -n 1; ps -eo pid,comm,%cpu,%mem --sort=-%cpu 2>/dev/null | head -n 9",
-                timeout=4,
-            )
-            out = stdout.read().decode("utf-8", errors="replace").strip()
-            if out and "Mem:" in out:
-                lines = out.splitlines()
-                load_1m = float(lines[0].split()[0]) if lines else 0.0
-                cpu_pct = min(100.0, round(load_1m * 25.0, 1))
-                mem_total, mem_used = 1, 0
-                disk_total, disk_used = 1, 0
-                procs = []
-                for ln in lines:
-                    if ln.startswith("Mem:"):
-                        parts = ln.split()
+    try:
+        _, stdout, _ = session.client.exec_command(
+            "cat /proc/loadavg 2>/dev/null; free -b 2>/dev/null; df -B1 / 2>/dev/null | tail -n 1; cat /proc/uptime 2>/dev/null; ps -eo pid,comm,%cpu,%mem --sort=-%cpu 2>/dev/null | head -n 9",
+            timeout=5,
+        )
+        out = stdout.read().decode("utf-8", errors="replace").strip()
+        if out:
+            lines = out.splitlines()
+            load_1m = 0.0
+            try:
+                load_1m = float(lines[0].split()[0])
+            except Exception:
+                pass
+            cpu_pct = min(100.0, round(load_1m * 25.0, 1))
+            mem_total, mem_used = 1, 0
+            disk_total, disk_used = 1, 0
+            uptime_sec = int(time.time() - session.created_at)
+            procs = []
+            for ln in lines[1:]:
+                if ln.startswith("Mem:"):
+                    parts = ln.split()
+                    if len(parts) >= 3:
                         mem_total = int(parts[1])
                         mem_used = int(parts[2])
-                    elif ln.startswith("/"):
-                        parts = ln.split()
-                        if len(parts) >= 4:
-                            disk_total = int(parts[1])
-                            disk_used = int(parts[2])
-                    elif ln.strip() and ln.strip()[0].isdigit() and "/" not in ln[:6]:
-                        parts = ln.split()
-                        if len(parts) >= 4:
+                elif ln.startswith("/"):
+                    parts = ln.split()
+                    if len(parts) >= 4 and parts[1].isdigit() and parts[2].isdigit():
+                        disk_total = int(parts[1])
+                        disk_used = int(parts[2])
+                elif len(ln.split()) == 2 and "." in ln.split()[0]:
+                    try:
+                        uptime_sec = int(float(ln.split()[0]))
+                    except Exception:
+                        pass
+                elif ln.strip() and ln.strip()[0].isdigit():
+                    parts = ln.split()
+                    if len(parts) >= 4:
+                        try:
                             procs.append(
                                 {
                                     "pid": int(parts[0]),
@@ -1660,53 +1130,32 @@ def _collect_telemetry(session: SSHSession) -> dict:
                                     "mem": float(parts[3]),
                                 }
                             )
-                return {
-                    "cpu_percent": cpu_pct,
-                    "mem_total": mem_total,
-                    "mem_used": mem_used,
-                    "mem_percent": round((mem_used / max(1, mem_total)) * 100, 1),
-                    "disk_total": disk_total,
-                    "disk_used": disk_used,
-                    "disk_percent": round((disk_used / max(1, disk_total)) * 100, 1),
-                    "uptime_seconds": int(time.time() - session.created_at),
-                    "processes": procs[:8],
-                }
-        except Exception:
-            pass
-
-    # Fallback / Local Sandbox Telemetry via psutil
-    cpu_pct = psutil.cpu_percent(interval=0.05)
-    vm = psutil.virtual_memory()
-    du = shutil.disk_usage(str(SANDBOX_ROOT))
-    uptime = int(time.time() - psutil.boot_time())
-
-    procs = []
-    for p in psutil.process_iter(["pid", "name", "cpu_percent", "memory_percent"]):
-        try:
-            info = p.info
-            if info["name"]:
-                procs.append(
-                    {
-                        "pid": info["pid"],
-                        "name": info["name"],
-                        "cpu": round(float(info.get("cpu_percent") or 0.0), 1),
-                        "mem": round(float(info.get("memory_percent") or 0.0), 1),
-                    }
-                )
-        except Exception:
-            continue
-    procs.sort(key=lambda x: (x["mem"], x["cpu"]), reverse=True)
+                        except Exception:
+                            continue
+            return {
+                "cpu_percent": cpu_pct,
+                "mem_total": mem_total,
+                "mem_used": mem_used,
+                "mem_percent": round((mem_used / max(1, mem_total)) * 100, 1),
+                "disk_total": disk_total,
+                "disk_used": disk_used,
+                "disk_percent": round((disk_used / max(1, disk_total)) * 100, 1),
+                "uptime_seconds": uptime_sec,
+                "processes": procs[:8],
+            }
+    except Exception:
+        pass
 
     return {
-        "cpu_percent": round(cpu_pct, 1),
-        "mem_total": vm.total,
-        "mem_used": vm.used,
-        "mem_percent": round(vm.percent, 1),
-        "disk_total": du.total,
-        "disk_used": du.used,
-        "disk_percent": round((du.used / max(1, du.total)) * 100, 1),
-        "uptime_seconds": uptime,
-        "processes": procs[:8],
+        "cpu_percent": 0.0,
+        "mem_total": 0,
+        "mem_used": 0,
+        "mem_percent": 0.0,
+        "disk_total": 0,
+        "disk_used": 0,
+        "disk_percent": 0.0,
+        "uptime_seconds": int(time.time() - session.created_at),
+        "processes": [],
     }
 
 
@@ -1851,11 +1300,7 @@ async def read_local_ssh_config():
         "    HostName 10.20.1.15\n"
         "    User ubuntu\n"
         "    Port 22\n"
-        "    ProxyJump bastion@203.0.113.5:22\n\n"
-        "Host local-sandbox\n"
-        "    HostName 127.0.0.1\n"
-        "    User demo\n"
-        "    Port 2222\n"
+        "    ProxyJump bastion@203.0.113.5:22\n"
     )
     return {"found": False, "path": "~/.ssh/config (sample)", "content": sample}
 
@@ -1886,7 +1331,6 @@ async def create_session_tunnel(session_id: str, req: TunnelCreateRequest):
         if tun:
             tun.active_connections += 1
 
-        # Try opening direct-tcpip channel on SSH transport first; fallback to direct TCP for sandbox
         transport = session.client.get_transport()
         ssh_chan = None
         if transport and transport.is_active():
@@ -1900,68 +1344,43 @@ async def create_session_tunnel(session_id: str, req: TunnelCreateRequest):
             except Exception:
                 ssh_chan = None
 
-        if ssh_chan is not None:
-            ssh_chan.setblocking(False)
-            try:
-                async def c2s():
-                    while not reader.at_eof():
-                        data = await reader.read(4096)
-                        if not data:
-                            break
-                        await asyncio.to_thread(ssh_chan.sendall, data)
-                        if tun:
-                            tun.bytes_transferred += len(data)
-
-                async def s2c():
-                    while not ssh_chan.closed:
-                        if ssh_chan.recv_ready():
-                            data = await asyncio.to_thread(ssh_chan.recv, 4096)
-                            if not data:
-                                break
-                            writer.write(data)
-                            await writer.drain()
-                            if tun:
-                                tun.bytes_transferred += len(data)
-                        else:
-                            await asyncio.sleep(0.01)
-
-                await asyncio.gather(c2s(), s2c(), return_exceptions=True)
-            finally:
-                try:
-                    ssh_chan.close()
-                except Exception:
-                    pass
-                writer.close()
-                if tun:
-                    tun.active_connections = max(0, tun.active_connections - 1)
+        if ssh_chan is None:
+            writer.close()
+            if tun:
+                tun.active_connections = max(0, tun.active_connections - 1)
             return
 
-        # Direct TCP bridge fallback (for embedded sandbox server where direct-tcpip may be disabled)
+        ssh_chan.setblocking(False)
         try:
-            rem_reader, rem_writer = await asyncio.open_connection(req.remote_host, req.remote_port)
+            async def c2s():
+                while not reader.at_eof():
+                    data = await reader.read(4096)
+                    if not data:
+                        break
+                    await asyncio.to_thread(ssh_chan.sendall, data)
+                    if tun:
+                        tun.bytes_transferred += len(data)
 
-            async def pipe(r: asyncio.StreamReader, w: asyncio.StreamWriter):
-                try:
-                    while not r.at_eof():
-                        chunk = await r.read(4096)
-                        if not chunk:
+            async def s2c():
+                while not ssh_chan.closed:
+                    if ssh_chan.recv_ready():
+                        data = await asyncio.to_thread(ssh_chan.recv, 4096)
+                        if not data:
                             break
-                        w.write(chunk)
-                        await w.drain()
+                        writer.write(data)
+                        await writer.drain()
                         if tun:
-                            tun.bytes_transferred += len(chunk)
-                except Exception:
-                    pass
-                finally:
-                    try:
-                        w.close()
-                    except Exception:
-                        pass
+                            tun.bytes_transferred += len(data)
+                    else:
+                        await asyncio.sleep(0.01)
 
-            await asyncio.gather(pipe(reader, rem_writer), pipe(rem_reader, writer))
-        except Exception:
-            writer.close()
+            await asyncio.gather(c2s(), s2c(), return_exceptions=True)
         finally:
+            try:
+                ssh_chan.close()
+            except Exception:
+                pass
+            writer.close()
             if tun:
                 tun.active_connections = max(0, tun.active_connections - 1)
 
@@ -2041,7 +1460,6 @@ async def ssh_websocket(
                     if not data:
                         break
                     text = data.decode("utf-8", errors="replace")
-                    # Detect OSC-7 working directory change emitted by shell
                     match = osc7_pattern.search(text)
                     cwd_changed = None
                     if match:

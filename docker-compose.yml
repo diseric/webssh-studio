@@ -6,8 +6,6 @@ services:
     restart: unless-stopped
     ports:
       - "8090:8090"
-      # Optional: Expose the built-in local SSH2 + SFTP sandbox server
-      - "2222:2222"
     environment:
       - WEBSSH_HOST=0.0.0.0
       - WEBSSH_PORT=8090

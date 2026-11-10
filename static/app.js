@@ -935,7 +935,8 @@ async function uploadFilesToActiveSession(fileItems) {
   if (!fileItems || !fileItems.length) return;
 
   if (!getActiveSession()) {
-    await connectQuickSandbox();
+    openConnectModal();
+    return;
   }
 
   const active = getActiveSession();
@@ -1149,7 +1150,8 @@ function openParameterizedPlaybookModal(pb, vars) {
     modal.classList.add("hidden");
     const finalCmd = resolvePlaybookCommand(pb.command, currentValues);
     if (!getActiveSession()) {
-      await connectQuickSandbox();
+      openConnectModal();
+      return;
     }
     sendTerminalCommand(finalCmd);
   };
@@ -1220,7 +1222,8 @@ function renderPlaybooks() {
         openParameterizedPlaybookModal(pb, vars);
       } else {
         if (!getActiveSession()) {
-          await connectQuickSandbox();
+          openConnectModal();
+          return;
         }
         sendTerminalCommand(pb.command);
       }
@@ -1389,16 +1392,6 @@ function renderTunnels(tunnels) {
 // ---------------------------------------------------------------------------
 // Event Listeners & UI Wiring
 // ---------------------------------------------------------------------------
-async function connectQuickSandbox() {
-  await connectSSH({
-    host: "127.0.0.1",
-    port: 2222,
-    username: "demo",
-    auth_type: "password",
-    password: "demo",
-  });
-}
-
 function openConnectModal() {
   el.connectError.classList.add("hidden");
   loadVaultProfiles();
@@ -1410,8 +1403,6 @@ function closeConnectModal() {
   el.connectModal.classList.add("hidden");
 }
 
-el.btnQuickSandbox.addEventListener("click", connectQuickSandbox);
-el.btnEmptySandbox.addEventListener("click", connectQuickSandbox);
 el.btnNewConnection.addEventListener("click", openConnectModal);
 el.btnEmptyCustom.addEventListener("click", openConnectModal);
 el.btnCloseModal.addEventListener("click", closeConnectModal);
@@ -1449,17 +1440,6 @@ el.sidebarTabs.forEach((tabBtn) => {
       refreshTunnels();
     }
   });
-});
-
-el.btnFillSandbox.addEventListener("click", () => {
-  el.sshProfileName.value = "Local SSH Sandbox";
-  el.sshHost.value = "127.0.0.1";
-  el.sshPort.value = "2222";
-  el.sshUsername.value = "demo";
-  el.sshAuthType.value = "password";
-  el.sshPassword.value = "demo";
-  el.authPasswordGroup.classList.remove("hidden");
-  el.authKeyGroup.classList.add("hidden");
 });
 
 el.sshAuthType.addEventListener("change", () => {
@@ -1648,7 +1628,8 @@ el.playbookForm.addEventListener("submit", async (e) => {
 el.tunnelForm.addEventListener("submit", async (e) => {
   e.preventDefault();
   if (!getActiveSession()) {
-    await connectQuickSandbox();
+    openConnectModal();
+    return;
   }
   const active = getActiveSession();
   if (!active) return;

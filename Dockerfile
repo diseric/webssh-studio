@@ -12,7 +12,6 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# Install optional system utilities useful for local diagnostics
 RUN apt-get update && apt-get install -y --no-install-recommends \
     openssh-client \
     iputils-ping \
@@ -30,7 +29,7 @@ RUN mkdir -p /data
 
 VOLUME ["/data"]
 
-EXPOSE 8090 2222
+EXPOSE 8090
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD curl -f http://127.0.0.1:8090/api/info || exit 1

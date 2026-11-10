@@ -67,9 +67,6 @@
       <button id="btn-open-security" class="btn btn-outline btn-xs" title="Configure Master Password Lock &amp; Reverse-Proxy SSO">
         🔒 Security
       </button>
-      <button id="btn-quick-sandbox" class="btn btn-emerald btn-xs" title="Connect to the built-in local SSH2 + SFTP Sandbox Server on 127.0.0.1:2222">
-        ⚡ Sandbox
-      </button>
       <button id="btn-new-connection" class="btn btn-primary btn-xs">
         + New SSH
       </button>
@@ -145,10 +142,7 @@
             <h2>Connect to an SSH Server</h2>
             <p>Open an interactive PTY terminal session, drag &amp; drop files via SFTP, edit remote files in-browser, monitor live telemetry, and manage SSH port tunnels.</p>
             <div class="empty-actions">
-              <button id="btn-empty-sandbox" class="btn btn-emerald btn-lg">
-                ⚡ Launch Local SSH Sandbox (127.0.0.1:2222)
-              </button>
-              <button id="btn-empty-custom" class="btn btn-secondary btn-lg">
+              <button id="btn-empty-custom" class="btn btn-primary btn-lg">
                 🔑 Connect or Choose Saved Profile...
               </button>
             </div>
@@ -372,7 +366,6 @@
         <div class="vault-section">
           <div class="section-header-row">
             <h3>Saved Connection Profiles (Encrypted Vault)</h3>
-            <button type="button" id="btn-fill-sandbox" class="btn btn-emerald btn-xs">⚡ Fill Sandbox Preset</button>
           </div>
           <div id="saved-profiles-list" class="saved-profiles-grid"></div>
         </div>
@@ -385,18 +378,18 @@
             </div>
             <div class="form-group flex-2">
               <label for="ssh-host">Host / IP Address</label>
-              <input id="ssh-host" type="text" placeholder="127.0.0.1" value="127.0.0.1" required />
+              <input id="ssh-host" type="text" placeholder="e.g. 192.168.1.50 or server.example.com" required />
             </div>
             <div class="form-group flex-1">
               <label for="ssh-port">Port</label>
-              <input id="ssh-port" type="number" value="2222" min="1" max="65535" required />
+              <input id="ssh-port" type="number" value="22" min="1" max="65535" required />
             </div>
           </div>
 
           <div class="form-row">
             <div class="form-group flex-2">
               <label for="ssh-username">Username</label>
-              <input id="ssh-username" type="text" placeholder="demo, ubuntu, root..." value="demo" required />
+              <input id="ssh-username" type="text" placeholder="root, ubuntu, eric..." required />
             </div>
             <div class="form-group flex-2">
               <label for="ssh-auth-type">Authentication Method</label>
@@ -409,7 +402,7 @@
 
           <div id="auth-password-group" class="form-group">
             <label for="ssh-password">Password</label>
-            <input id="ssh-password" type="password" placeholder="Enter SSH password" value="demo" />
+            <input id="ssh-password" type="password" placeholder="Enter SSH password" />
           </div>
 
           <div id="auth-key-group" class="form-group hidden">
@@ -435,19 +428,19 @@
             <div class="form-row">
               <div class="form-group flex-2">
                 <label for="jump-host">Bastion Host / IP</label>
-                <input id="jump-host" type="text" placeholder="127.0.0.1 or bastion.example.com" />
+                <input id="jump-host" type="text" placeholder="bastion.example.com" />
               </div>
               <div class="form-group flex-1">
                 <label for="jump-port">Port</label>
-                <input id="jump-port" type="number" value="2222" />
+                <input id="jump-port" type="number" value="22" />
               </div>
               <div class="form-group flex-1">
                 <label for="jump-username">Bastion User</label>
-                <input id="jump-username" type="text" value="demo" />
+                <input id="jump-username" type="text" placeholder="ubuntu" />
               </div>
               <div class="form-group flex-1">
                 <label for="jump-password">Bastion Password</label>
-                <input id="jump-password" type="password" value="demo" />
+                <input id="jump-password" type="password" placeholder="Bastion password" />
               </div>
             </div>
           </div>

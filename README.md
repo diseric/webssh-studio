@@ -22,7 +22,7 @@ Think **MobaXterm + Termius in a single Docker container**—accessible from any
   - **Auto-Tail Live Log (`2s`)** mode for streaming remote `.log` files in real time, plus inline image preview
 - ⚡ **Parameterized Command Playbooks (`{{var:default}}`)**
   - Comes pre-loaded with **15 sysadmin & DevOps playbooks** across *Diagnostics*, *Storage*, *Networking*, *Security*, and *Containers & Git*
-  - Supports dynamic template placeholders like `{{limit:11}}` or `{{target_host:127.0.0.1}}` that prompt for values with live command preview before execution
+  - Supports dynamic template placeholders like `{{limit:11}}` or `{{target_host:1.1.1.1}}` that prompt for values with live command preview before execution
 - 📊 **Live Server Telemetry HUD & Process Inspector**
   - Agentless real-time **CPU %**, **RAM %**, **Disk %**, **Uptime**, and **Top Processes** table polled over the active SSH connection
 - 🔐 **Encrypted Connection Vault, `~/.ssh/config` Importer, `ProxyJump` & Port Tunnels**
@@ -44,12 +44,11 @@ Think **MobaXterm + Termius in a single Docker container**—accessible from any
 ```yaml
 services:
   webssh-studio:
-    image: your-dockerhub-username/webssh-studio:latest
+    image: diseric/webssh-studio:latest
     container_name: webssh-studio
     restart: unless-stopped
     ports:
       - "8090:8090"
-      - "2222:2222" # Optional built-in local SSH2 + SFTP sandbox
     environment:
       - WEBSSH_DATA_DIR=/data
       - WEBSSH_APP_PASSWORD=change-me-optional

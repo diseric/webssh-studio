@@ -10,85 +10,85 @@
     "id": "pb-top-offenders",
     "name": "Top CPU & Memory Offenders",
     "category": "Diagnostics",
-    "description": "Lists the top CPU and memory consuming processes currently running.",
-    "command": "ps aux --sort=-%cpu | head -n 11"
+    "description": "Lists the top {{limit:11}} CPU-consuming processes currently running.",
+    "command": "ps aux --sort=-%cpu | head -n {{limit:11}}"
   },
   {
     "id": "pb-recent-errors",
     "name": "Recent System & Service Errors",
     "category": "Diagnostics",
-    "description": "Pulls recent error/warning entries from system logs and server.log.",
-    "command": "journalctl -p err -n 20 --no-pager"
+    "description": "Pulls the last {{lines:25}} error/warning entries from systemd journal.",
+    "command": "journalctl -p err -n {{lines:25}} --no-pager"
   },
   {
     "id": "pb-disk-hogs",
     "name": "Find Largest Files & Folders",
     "category": "Storage",
-    "description": "Scans current working directory for disk usage by file and folder.",
-    "command": "du -sh * && df -h"
+    "description": "Scans {{target_path:.}} for disk usage sorted largest-first.",
+    "command": "du -sh {{target_path:.}}/* 2>/dev/null | sort -hr | head -n {{limit:15}}"
   },
   {
     "id": "pb-clean-temp",
-    "name": "Inspect & Clean Temp Workspace",
+    "name": "Inspect File Metadata & Inodes",
     "category": "Storage",
-    "description": "Lists workspace files and verifies writable storage status.",
-    "command": "pwd && ls -la && stat welcome.txt"
+    "description": "Lists directory contents and checks inode usage across mounted filesystems.",
+    "command": "pwd && ls -la && df -i"
   },
   {
     "id": "pb-backup-snapshot",
-    "name": "Quick Timestamped Backup Archive",
+    "name": "Quick Timestamped Directory Backup",
     "category": "Storage",
-    "description": "Creates a backups directory and archives configuration & log files.",
-    "command": "mkdir backups && tar -czf backups/config_snapshot.tar.gz app_config.json welcome.txt && ls -la backups"
+    "description": "Compresses {{source_dir:.}} into {{archive_name:backup_snapshot.tar.gz}}.",
+    "command": "tar -czf {{archive_name:backup_snapshot.tar.gz}} {{source_dir:.}} && ls -lh {{archive_name:backup_snapshot.tar.gz}}"
   },
   {
     "id": "pb-listening-ports",
     "name": "Listening Ports & Active Sockets",
     "category": "Networking",
-    "description": "Shows open TCP listening ports and bound server processes.",
+    "description": "Shows open TCP/UDP listening ports and bound server processes.",
     "command": "ss -tulnp"
   },
   {
     "id": "pb-net-latency",
-    "name": "Network Interface & DNS Check",
+    "name": "Network Ping & Latency Check",
     "category": "Networking",
-    "description": "Checks active network interfaces, routing, and loopback connectivity.",
-    "command": "ping -n 2 127.0.0.1"
+    "description": "Pings {{target_host:1.1.1.1}} to verify outbound routing and latency.",
+    "command": "ping -c {{count:3}} {{target_host:1.1.1.1}}"
   },
   {
     "id": "pb-ssl-check",
-    "name": "TLS / Config Endpoint Audit",
+    "name": "TLS Certificate Expiry Audit",
     "category": "Networking",
-    "description": "Inspects application TLS and port configuration in app_config.json.",
-    "command": "cat app_config.json"
+    "description": "Checks TLS certificate expiration dates for {{domain_port:localhost:443}}.",
+    "command": "openssl s_client -connect {{domain_port:localhost:443}} </dev/null 2>/dev/null | openssl x509 -noout -dates"
   },
   {
     "id": "pb-ssh-users",
     "name": "Active SSH Users & Recent Logins",
     "category": "Security",
-    "description": "Shows currently logged-in sessions, recent logins, and auth events.",
-    "command": "whoami && w && last -n 5"
+    "description": "Shows currently logged-in sessions and last {{login_count:10}} logins.",
+    "command": "whoami && w && last -n {{login_count:10}}"
   },
   {
     "id": "pb-ssh-perms",
     "name": "SSH Key & Permissions Audit",
     "category": "Security",
-    "description": "Audits directory permissions and checks for exposed credential files.",
-    "command": "ls -la && stat app_config.json"
+    "description": "Audits ~/.ssh directory permissions and authorized_keys configuration.",
+    "command": "ls -la ~/.ssh && stat ~/.ssh/authorized_keys 2>/dev/null || true"
   },
   {
     "id": "pb-world-writable",
-    "name": "World-Writable & Config Integrity Check",
+    "name": "Failed SSH Login & Auth Log Audit",
     "category": "Security",
-    "description": "Scans workspace files and prints recent security warnings from server.log.",
-    "command": "cat server.log"
+    "description": "Checks recent authentication events in {{auth_log:/var/log/auth.log}}.",
+    "command": "tail -n {{lines:25}} {{auth_log:/var/log/auth.log}} 2>/dev/null || journalctl -u ssh -n {{lines:25}} --no-pager"
   },
   {
     "id": "pb-docker-status",
     "name": "Docker Container & Resource Status",
     "category": "Containers & Git",
     "description": "Lists running containers and resource utilization snapshot.",
-    "command": "docker ps && docker stats --no-stream"
+    "command": "docker ps -a && docker stats --no-stream"
   },
   {
     "id": "pb-systemd-failed",
@@ -101,7 +101,7 @@
     "id": "pb-git-status",
     "name": "Git Repo Status & Recent Commits",
     "category": "Containers & Git",
-    "description": "Displays current branch status and latest commit history.",
-    "command": "git status -sb || ls -la"
+    "description": "Displays current branch status and latest {{commit_count:5}} commits.",
+    "command": "git status -sb && git log --oneline -n {{commit_count:5}}"
   }
 ]
