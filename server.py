@@ -680,8 +680,8 @@ async def setup_app_auth(req: AuthSetupRequest, request: Request, response: Resp
     _check_rate_limit(client_ip)
 
     cfg = load_auth_config()
-    # Always require current password or active authenticated session if a password hash exists
-    if cfg.get("password_hash"):
+    # Require current password or active authenticated session only when auth is currently enabled
+    if cfg.get("enabled") and cfg.get("password_hash"):
         authed, _, mode = _is_request_authenticated(request)
         if not authed or mode == "open":
             cur_hash = _hash_password(req.current_password or "", cfg.get("salt", ""))
@@ -713,6 +713,8 @@ async def setup_app_auth(req: AuthSetupRequest, request: Request, response: Resp
         return {"status": "enabled", "auth_enabled": True, "token": token}
     else:
         cfg["enabled"] = False
+        cfg["salt"] = ""
+        cfg["password_hash"] = ""
         save_auth_config(cfg)
         return {"status": "disabled", "auth_enabled": False}
 

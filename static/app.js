@@ -1854,6 +1854,8 @@ const lockOverlay = document.getElementById("app-lock-overlay");
 const btnOpenSecurity = document.getElementById("btn-open-security");
 const chkAuthEnabled = document.getElementById("chk-auth-enabled");
 const chkTrustProxy = document.getElementById("chk-trust-proxy");
+const secCurrentPwGroup = document.getElementById("sec-current-pw-group");
+const secCurrentPassword = document.getElementById("sec-current-password");
 const secNewPassword = document.getElementById("sec-new-password");
 const btnLockNow = document.getElementById("btn-lock-now");
 const securityStatusMsg = document.getElementById("security-status-msg");
@@ -1864,6 +1866,9 @@ async function checkAuthStatus() {
     const st = await resp.json();
     chkAuthEnabled.checked = Boolean(st.auth_enabled);
     chkTrustProxy.checked = Boolean(st.trust_proxy_headers);
+    if (secCurrentPwGroup) {
+      secCurrentPwGroup.classList.toggle("hidden", !st.auth_enabled);
+    }
     btnLockNow.classList.toggle("hidden", !st.auth_enabled);
     if (btnOpenSecurity) {
       btnOpenSecurity.textContent = st.auth_enabled ? "🔒 Protected" : "🔓 Security";
@@ -1898,6 +1903,7 @@ document.getElementById("security-form")?.addEventListener("submit", async (e) =
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       enabled: chkAuthEnabled.checked,
+      current_password: secCurrentPassword ? secCurrentPassword.value : "",
       new_password: secNewPassword.value,
       trust_proxy_headers: chkTrustProxy.checked,
     }),
@@ -1908,6 +1914,7 @@ document.getElementById("security-form")?.addEventListener("submit", async (e) =
     securityStatusMsg.classList.remove("hidden");
     return;
   }
+  if (secCurrentPassword) secCurrentPassword.value = "";
   secNewPassword.value = "";
   securityModal.classList.add("hidden");
   await checkAuthStatus();
