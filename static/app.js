@@ -22,9 +22,7 @@ const el = {
   btnToggleBroadcast: document.getElementById("btn-toggle-broadcast"),
   btnToggleSplit: document.getElementById("btn-toggle-split"),
   btnOpenSshConfig: document.getElementById("btn-open-ssh-config"),
-  btnQuickSandbox: document.getElementById("btn-quick-sandbox"),
   btnNewConnection: document.getElementById("btn-new-connection"),
-  btnEmptySandbox: document.getElementById("btn-empty-sandbox"),
   btnEmptyCustom: document.getElementById("btn-empty-custom"),
   statusDot: document.getElementById("status-dot"),
   statusText: document.getElementById("status-text"),
@@ -103,7 +101,6 @@ const el = {
   connectModal: document.getElementById("connect-modal"),
   btnCloseModal: document.getElementById("btn-close-modal"),
   btnCancelModal: document.getElementById("btn-cancel-modal"),
-  btnFillSandbox: document.getElementById("btn-fill-sandbox"),
   savedProfilesList: document.getElementById("saved-profiles-list"),
   sshConnectForm: document.getElementById("ssh-connect-form"),
   sshProfileName: document.getElementById("ssh-profile-name"),
@@ -1482,6 +1479,10 @@ el.sshConnectForm.addEventListener("submit", async (e) => {
 // Terminal Toolbar & Search
 document.querySelectorAll(".chip-btn").forEach((btn) => {
   btn.addEventListener("click", () => {
+    if (!getActiveSession()) {
+      openConnectModal();
+      return;
+    }
     const cmd = btn.getAttribute("data-cmd");
     if (cmd) sendTerminalCommand(cmd);
   });
@@ -1516,7 +1517,10 @@ el.btnFontInc.addEventListener("click", () => {
 
 el.btnExportLog.addEventListener("click", () => {
   const active = getActiveSession();
-  if (!active) return;
+  if (!active) {
+    openConnectModal();
+    return;
+  }
   const blob = new Blob([active.transcript || ""], { type: "text/plain" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
@@ -1540,7 +1544,10 @@ el.btnDisconnect.addEventListener("click", () => {
 // Remote Directory Controls & Zip Download
 el.btnDownloadDirZip.addEventListener("click", () => {
   const active = getActiveSession();
-  if (!active) return;
+  if (!active) {
+    openConnectModal();
+    return;
+  }
   const cur = el.remotePathInput.value.trim() || active.currentDir || "/";
   window.open(
     `/api/sessions/${active.id}/download-zip?path=${encodeURIComponent(cur)}`,
@@ -1550,24 +1557,31 @@ el.btnDownloadDirZip.addEventListener("click", () => {
 
 el.btnDirGo.addEventListener("click", () => {
   const active = getActiveSession();
-  if (active) {
-    refreshRemoteFiles(active.id, el.remotePathInput.value.trim() || "/");
+  if (!active) {
+    openConnectModal();
+    return;
   }
+  refreshRemoteFiles(active.id, el.remotePathInput.value.trim() || "/");
 });
 
 el.remotePathInput.addEventListener("keydown", (e) => {
   if (e.key === "Enter") {
     e.preventDefault();
     const active = getActiveSession();
-    if (active) {
-      refreshRemoteFiles(active.id, el.remotePathInput.value.trim() || "/");
+    if (!active) {
+      openConnectModal();
+      return;
     }
+    refreshRemoteFiles(active.id, el.remotePathInput.value.trim() || "/");
   }
 });
 
 el.btnDirUp.addEventListener("click", () => {
   const active = getActiveSession();
-  if (!active) return;
+  if (!active) {
+    openConnectModal();
+    return;
+  }
   const cur = active.currentDir || "/";
   const parent = cur === "/" ? "/" : cur.split("/").slice(0, -1).join("/") || "/";
   refreshRemoteFiles(active.id, parent);
@@ -1575,12 +1589,19 @@ el.btnDirUp.addEventListener("click", () => {
 
 el.btnDirRefresh.addEventListener("click", () => {
   const active = getActiveSession();
-  if (active) refreshRemoteFiles(active.id, active.currentDir);
+  if (!active) {
+    openConnectModal();
+    return;
+  }
+  refreshRemoteFiles(active.id, active.currentDir);
 });
 
 el.btnDirMkdir.addEventListener("click", async () => {
   const active = getActiveSession();
-  if (!active) return;
+  if (!active) {
+    openConnectModal();
+    return;
+  }
   const folderName = window.prompt("New remote folder name:", "uploads");
   if (!folderName) return;
   const base = active.currentDir === "/" ? "" : active.currentDir;
