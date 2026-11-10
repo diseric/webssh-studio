@@ -43,6 +43,19 @@ VAULT_KEY_PATH = DATA_DIR / "vault.key"
 PROFILES_PATH = DATA_DIR / "profiles.json"
 PLAYBOOKS_PATH = DATA_DIR / "playbooks.json"
 AUTH_CONFIG_PATH = DATA_DIR / "auth_config.json"
+KNOWN_HOSTS_PATH = DATA_DIR / "known_hosts"
+
+
+def _enforce_private_perms(path: Path):
+    try:
+        if path.exists():
+            os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
+for _sec_file in (VAULT_KEY_PATH, PROFILES_PATH, AUTH_CONFIG_PATH, KNOWN_HOSTS_PATH):
+    _enforce_private_perms(_sec_file)
 
 
 # ---------------------------------------------------------------------------
@@ -51,6 +64,7 @@ AUTH_CONFIG_PATH = DATA_DIR / "auth_config.json"
 def _get_fernet() -> Fernet:
     if not VAULT_KEY_PATH.exists():
         VAULT_KEY_PATH.write_bytes(Fernet.generate_key())
+        _enforce_private_perms(VAULT_KEY_PATH)
     return Fernet(VAULT_KEY_PATH.read_bytes())
 
 
@@ -72,6 +86,7 @@ def _decrypt_secret(token: Optional[str]) -> str:
 def load_profiles() -> List[dict]:
     if not PROFILES_PATH.exists():
         PROFILES_PATH.write_text("[]\n", encoding="utf-8")
+        _enforce_private_perms(PROFILES_PATH)
         return []
     try:
         data = json.loads(PROFILES_PATH.read_text(encoding="utf-8"))
@@ -86,6 +101,7 @@ def load_profiles() -> List[dict]:
 
 def save_profiles(profiles: List[dict]):
     PROFILES_PATH.write_text(json.dumps(profiles, indent=2), encoding="utf-8")
+    _enforce_private_perms(PROFILES_PATH)
 
 
 DEFAULT_PLAYBOOKS = [
@@ -220,6 +236,40 @@ def save_playbooks(playbooks: List[dict]):
 # App-Level Authentication & Reverse-Proxy SSO Support
 # ---------------------------------------------------------------------------
 AUTH_TOKENS: Dict[str, float] = {}
+FAILED_AUTH_ATTEMPTS: Dict[str, List[float]] = {}
+RATE_LIMIT_WINDOW_SEC = 60.0
+RATE_LIMIT_MAX_FAILURES = 5
+
+
+def _prune_expired_tokens():
+    now = time.time()
+    expired = [k for k, exp in AUTH_TOKENS.items() if exp <= now]
+    for k in expired:
+        AUTH_TOKENS.pop(k, None)
+
+
+def _get_client_ip(client_obj) -> str:
+    if client_obj and getattr(client_obj, "host", None):
+        return str(client_obj.host)
+    return "unknown"
+
+
+def _check_rate_limit(ip: str):
+    now = time.time()
+    recent = [t for t in FAILED_AUTH_ATTEMPTS.get(ip, []) if now - t < RATE_LIMIT_WINDOW_SEC]
+    FAILED_AUTH_ATTEMPTS[ip] = recent
+    if len(recent) >= RATE_LIMIT_MAX_FAILURES:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many failed attempts. Please wait 60 seconds before trying again.",
+        )
+
+
+def _record_failed_attempt(ip: str):
+    now = time.time()
+    recent = [t for t in FAILED_AUTH_ATTEMPTS.get(ip, []) if now - t < RATE_LIMIT_WINDOW_SEC]
+    recent.append(now)
+    FAILED_AUTH_ATTEMPTS[ip] = recent
 
 
 def _hash_password(password: str, salt: str) -> str:
@@ -233,12 +283,18 @@ def load_auth_config() -> dict:
     if AUTH_CONFIG_PATH.exists():
         try:
             cfg = json.loads(AUTH_CONFIG_PATH.read_text(encoding="utf-8"))
-            if env_pw and not cfg.get("password_hash"):
-                salt = secrets.token_hex(16)
-                cfg["enabled"] = True
-                cfg["salt"] = salt
-                cfg["password_hash"] = _hash_password(env_pw, salt)
-                AUTH_CONFIG_PATH.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+            changed = False
+            if env_pw:
+                if not cfg.get("password_hash"):
+                    salt = secrets.token_hex(16)
+                    cfg["salt"] = salt
+                    cfg["password_hash"] = _hash_password(env_pw, salt)
+                    changed = True
+                if not cfg.get("enabled"):
+                    cfg["enabled"] = True
+                    changed = True
+            if changed:
+                save_auth_config(cfg)
             return cfg
         except Exception:
             pass
@@ -253,18 +309,27 @@ def load_auth_config() -> dict:
         salt = secrets.token_hex(16)
         cfg["salt"] = salt
         cfg["password_hash"] = _hash_password(env_pw, salt)
-    AUTH_CONFIG_PATH.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+    save_auth_config(cfg)
     return cfg
 
 
 def save_auth_config(cfg: dict):
     AUTH_CONFIG_PATH.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+    _enforce_private_perms(AUTH_CONFIG_PATH)
 
 
-def _extract_proxy_user(headers) -> Optional[str]:
+def _is_trusted_proxy_ip(client_ip: str) -> bool:
+    raw_trusted = os.environ.get("WEBSSH_TRUSTED_PROXIES", "127.0.0.1,::1").strip()
+    trusted_set = {ip.strip() for ip in raw_trusted.split(",") if ip.strip()}
+    return client_ip in trusted_set
+
+
+def _extract_proxy_user(headers, client_ip: str = "unknown") -> Optional[str]:
     cfg = load_auth_config()
     env_trust = os.environ.get("WEBSSH_TRUST_PROXY_HEADERS", "false").lower() in ("1", "true", "yes")
     if not (cfg.get("trust_proxy_headers") or env_trust):
+        return None
+    if not _is_trusted_proxy_ip(client_ip):
         return None
     for hdr in (
         "Remote-User",
@@ -278,26 +343,47 @@ def _extract_proxy_user(headers) -> Optional[str]:
     return None
 
 
-def _is_request_authenticated(request: Request) -> tuple[bool, Optional[str], str]:
+def _authenticate_headers_and_cookies(headers, cookies, client_ip: str) -> tuple[bool, Optional[str], str]:
     cfg = load_auth_config()
-    proxy_user = _extract_proxy_user(request.headers)
+    proxy_user = _extract_proxy_user(headers, client_ip)
     if proxy_user:
         return True, proxy_user, "proxy_sso"
 
     if not cfg.get("enabled"):
         return True, "admin", "open"
 
-    token = request.cookies.get("webssh_token") or ""
+    token = cookies.get("webssh_token") or ""
     if not token:
-        auth_hdr = request.headers.get("Authorization", "")
+        auth_hdr = headers.get("Authorization", "")
         if auth_hdr.startswith("Bearer "):
             token = auth_hdr[7:].strip()
 
+    _prune_expired_tokens()
     now = time.time()
     exp = AUTH_TOKENS.get(token)
     if exp and exp > now:
         return True, "admin", "password"
     return False, None, "password"
+
+
+def _is_request_authenticated(request: Request) -> tuple[bool, Optional[str], str]:
+    return _authenticate_headers_and_cookies(
+        request.headers, request.cookies, _get_client_ip(request.client)
+    )
+
+
+def _is_ws_authenticated(websocket: WebSocket) -> bool:
+    origin = websocket.headers.get("origin")
+    host = websocket.headers.get("host")
+    if origin and host:
+        from urllib.parse import urlparse
+        parsed_origin = urlparse(origin)
+        if parsed_origin.netloc and parsed_origin.netloc.lower() != host.lower():
+            return False
+    authed, _, _ = _authenticate_headers_and_cookies(
+        websocket.headers, websocket.cookies, _get_client_ip(websocket.client)
+    )
+    return authed
 
 
 # ---------------------------------------------------------------------------
@@ -502,12 +588,24 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="WebSSH & SFTP Studio", lifespan=lifespan)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+
+_allowed_origins_env = os.environ.get("WEBSSH_ALLOWED_ORIGINS", "").strip()
+if _allowed_origins_env:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[o.strip() for o in _allowed_origins_env.split(",") if o.strip()],
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type"],
+    )
+
+
+def _is_https_request(request: Request) -> bool:
+    if request.url.scheme == "https":
+        return True
+    if request.headers.get("X-Forwarded-Proto", "").lower() == "https":
+        return True
+    return False
 
 
 @app.middleware("http")
@@ -517,7 +615,12 @@ async def auth_guard_middleware(request: Request, call_next):
         authed, _, _ = _is_request_authenticated(request)
         if not authed:
             return JSONResponse(status_code=401, content={"detail": "Authentication required"})
-    return await call_next(request)
+    response = await call_next(request)
+    if path == "/" or path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
 
 
 @app.get("/api/auth/status")
@@ -535,21 +638,27 @@ async def get_auth_status(request: Request):
 
 
 @app.post("/api/auth/login")
-async def login_app(req: AuthLoginRequest, response: Response):
+async def login_app(req: AuthLoginRequest, request: Request, response: Response):
+    client_ip = _get_client_ip(request.client)
+    _check_rate_limit(client_ip)
+
     cfg = load_auth_config()
     if not cfg.get("enabled") or not cfg.get("password_hash"):
         return {"status": "ok", "authenticated": True}
 
     candidate = _hash_password(req.password, cfg.get("salt", ""))
     if not hmac.compare_digest(candidate, cfg.get("password_hash", "")):
+        _record_failed_attempt(client_ip)
         raise HTTPException(status_code=401, detail="Invalid master password.")
 
+    _prune_expired_tokens()
     token = secrets.token_urlsafe(32)
     AUTH_TOKENS[token] = time.time() + 86400 * 7
     response.set_cookie(
         key="webssh_token",
         value=token,
         httponly=True,
+        secure=_is_https_request(request),
         max_age=86400 * 7,
         samesite="lax",
     )
@@ -567,12 +676,17 @@ async def logout_app(request: Request, response: Response):
 
 @app.post("/api/auth/setup")
 async def setup_app_auth(req: AuthSetupRequest, request: Request, response: Response):
+    client_ip = _get_client_ip(request.client)
+    _check_rate_limit(client_ip)
+
     cfg = load_auth_config()
-    if cfg.get("enabled") and cfg.get("password_hash"):
-        authed, _, _ = _is_request_authenticated(request)
-        if not authed:
+    # Always require current password or active authenticated session if a password hash exists
+    if cfg.get("password_hash"):
+        authed, _, mode = _is_request_authenticated(request)
+        if not authed or mode == "open":
             cur_hash = _hash_password(req.current_password or "", cfg.get("salt", ""))
             if not hmac.compare_digest(cur_hash, cfg.get("password_hash", "")):
+                _record_failed_attempt(client_ip)
                 raise HTTPException(status_code=401, detail="Current master password is required.")
 
     cfg["trust_proxy_headers"] = req.trust_proxy_headers
@@ -585,12 +699,14 @@ async def setup_app_auth(req: AuthSetupRequest, request: Request, response: Resp
             raise HTTPException(status_code=400, detail="Please provide a new master password.")
         cfg["enabled"] = True
         save_auth_config(cfg)
+        _prune_expired_tokens()
         token = secrets.token_urlsafe(32)
         AUTH_TOKENS[token] = time.time() + 86400 * 7
         response.set_cookie(
             key="webssh_token",
             value=token,
             httponly=True,
+            secure=_is_https_request(request),
             max_age=86400 * 7,
             samesite="lax",
         )
@@ -599,6 +715,30 @@ async def setup_app_auth(req: AuthSetupRequest, request: Request, response: Resp
         cfg["enabled"] = False
         save_auth_config(cfg)
         return {"status": "disabled", "auth_enabled": False}
+
+
+class _TOFUHostKeyPolicy(paramiko.MissingHostKeyPolicy):
+    """Trust-On-First-Use (TOFU) policy that persists host keys to KNOWN_HOSTS_PATH.
+    If a host is already present in KNOWN_HOSTS_PATH with a different key, Paramiko
+    raises BadHostKeyException before invoking missing_host_key, preventing MITM.
+    """
+
+    def missing_host_key(self, client, hostname, key):
+        client.get_host_keys().add(hostname, key.get_name(), key)
+        try:
+            client.save_host_keys(str(KNOWN_HOSTS_PATH))
+            _enforce_private_perms(KNOWN_HOSTS_PATH)
+        except Exception:
+            pass
+
+
+def _configure_ssh_client_host_keys(client: paramiko.SSHClient):
+    if KNOWN_HOSTS_PATH.exists():
+        try:
+            client.load_host_keys(str(KNOWN_HOSTS_PATH))
+        except Exception:
+            pass
+    client.set_missing_host_key_policy(_TOFUHostKeyPolicy())
 
 
 def _parse_private_key(raw_key: Optional[str], passphrase: Optional[str] = None):
@@ -635,7 +775,7 @@ def _connect_paramiko(req: ConnectRequest) -> SSHSession:
 
     if req.use_jump_host and req.jump_host:
         jump_client = paramiko.SSHClient()
-        jump_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        _configure_ssh_client_host_keys(jump_client)
         jump_pkey = (
             _parse_private_key(req.jump_private_key)
             if req.jump_auth_type == "key"
@@ -662,7 +802,7 @@ def _connect_paramiko(req: ConnectRequest) -> SSHSession:
         jump_label = f"{req.jump_username or req.username}@{req.jump_host}:{req.jump_port}"
 
     client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    _configure_ssh_client_host_keys(client)
     pkey = _parse_private_key(private_key, passphrase) if req.auth_type == "key" else None
 
     client.connect(
@@ -708,7 +848,9 @@ async def get_info():
 
 
 @app.post("/api/sessions")
-async def create_session(req: ConnectRequest):
+async def create_session(req: ConnectRequest, request: Request):
+    client_ip = _get_client_ip(request.client)
+    _check_rate_limit(client_ip)
     try:
         session = await asyncio.to_thread(_connect_paramiko, req)
         SESSIONS[session.session_id] = session
@@ -722,6 +864,7 @@ async def create_session(req: ConnectRequest):
             "jump_host": session.jump_host_label,
         }
     except Exception as exc:
+        _record_failed_attempt(client_ip)
         raise HTTPException(status_code=400, detail=f"SSH connection failed: {exc}")
 
 
@@ -861,6 +1004,11 @@ async def rename_remote_file(session_id: str, req: RenameRequest):
         raise HTTPException(status_code=400, detail=f"Failed to rename: {exc}")
 
 
+MAX_ZIP_TOTAL_BYTES = 100 * 1024 * 1024
+MAX_ZIP_FILES = 2000
+MAX_UPLOAD_TOTAL_BYTES = 50 * 1024 * 1024
+
+
 @app.get("/api/sessions/{session_id}/download-zip")
 async def download_remote_zip(session_id: str, path: str = Query(default="/")):
     session = SESSIONS.get(session_id)
@@ -871,24 +1019,33 @@ async def download_remote_zip(session_id: str, path: str = Query(default="/")):
         sftp = session.ensure_sftp()
         norm_root = sftp.normalize(path or ".")
         zip_buf = io.BytesIO()
+        stats = {"bytes": 0, "files": 0}
 
         def _walk_and_add(cur_remote: str, rel_prefix: str, zf: zipfile.ZipFile):
             for attr in sftp.listdir_attr(cur_remote):
+                if stats["files"] >= MAX_ZIP_FILES or stats["bytes"] >= MAX_ZIP_TOTAL_BYTES:
+                    raise ValueError("Archive exceeds maximum size (100 MB) or file count (2,000 files) limit.")
                 full_p = posixpath.join(cur_remote, attr.filename)
                 arc_name = f"{rel_prefix}/{attr.filename}".lstrip("/")
                 if stat.S_ISDIR(attr.st_mode or 0):
                     _walk_and_add(full_p, arc_name, zf)
                 else:
-                    if (attr.st_size or 0) <= 25 * 1024 * 1024:
+                    fsize = attr.st_size or 0
+                    if fsize <= 25 * 1024 * 1024 and (stats["bytes"] + fsize) <= MAX_ZIP_TOTAL_BYTES:
                         fbuf = io.BytesIO()
                         sftp.getfo(full_p, fbuf)
-                        zf.writestr(arc_name, fbuf.getvalue())
+                        raw_bytes = fbuf.getvalue()
+                        zf.writestr(arc_name, raw_bytes)
+                        stats["bytes"] += len(raw_bytes)
+                        stats["files"] += 1
 
         with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
             st = sftp.stat(norm_root)
             if stat.S_ISDIR(st.st_mode or 0):
                 _walk_and_add(norm_root, "", zf)
             else:
+                if (st.st_size or 0) > MAX_ZIP_TOTAL_BYTES:
+                    raise ValueError("File exceeds maximum archive size limit (100 MB).")
                 fbuf = io.BytesIO()
                 sftp.getfo(norm_root, fbuf)
                 zf.writestr(posixpath.basename(norm_root), fbuf.getvalue())
@@ -987,12 +1144,24 @@ def _ensure_remote_dirs(sftp: paramiko.SFTPClient, remote_dir: str):
                 pass
 
 
+def _sanitize_relative_upload_path(rel_filename: str) -> str:
+    raw = rel_filename.replace("\\", "/").strip("/")
+    parts = [p for p in raw.split("/") if p and p not in (".", "..")]
+    if not parts:
+        raise ValueError("Invalid upload filename.")
+    return "/".join(parts)
+
+
 def _upload_file_sftp(session: SSHSession, target_dir: str, rel_filename: str, data: bytes) -> dict:
     sftp = session.ensure_sftp()
-    clean_rel = rel_filename.replace("\\", "/").lstrip("/")
-    remote_path = posixpath.join(target_dir, clean_rel)
+    norm_target = sftp.normalize(target_dir or ".")
+    clean_rel = _sanitize_relative_upload_path(rel_filename)
+    remote_path = posixpath.normpath(posixpath.join(norm_target, clean_rel))
+    if not (remote_path == norm_target or remote_path.startswith(norm_target.rstrip("/") + "/")):
+        raise ValueError("Path traversal outside target directory is not permitted.")
+
     parent_dir = posixpath.dirname(remote_path)
-    if parent_dir and parent_dir != target_dir:
+    if parent_dir and parent_dir != norm_target:
         _ensure_remote_dirs(sftp, parent_dir)
 
     bio = io.BytesIO(data)
@@ -1026,9 +1195,19 @@ async def upload_files(
             rel_list = []
 
     uploaded = []
+    total_bytes = 0
     try:
         for idx, up_file in enumerate(files):
-            raw = await up_file.read()
+            chunks = []
+            while True:
+                chunk = await up_file.read(65536)
+                if not chunk:
+                    break
+                total_bytes += len(chunk)
+                if total_bytes > MAX_UPLOAD_TOTAL_BYTES:
+                    raise ValueError("Upload exceeds 50 MB total size limit.")
+                chunks.append(chunk)
+            raw = b"".join(chunks)
             rel_name = (
                 rel_list[idx]
                 if idx < len(rel_list) and rel_list[idx]
@@ -1288,13 +1467,15 @@ async def import_ssh_config(req: SSHConfigImportRequest):
 
 @app.get("/api/ssh-config/local")
 async def read_local_ssh_config():
-    user_ssh_cfg = Path.home() / ".ssh" / "config"
-    if user_ssh_cfg.exists():
-        return {
-            "found": True,
-            "path": str(user_ssh_cfg),
-            "content": user_ssh_cfg.read_text(encoding="utf-8", errors="replace"),
-        }
+    allow_local = os.environ.get("WEBSSH_ALLOW_LOCAL_SSH_CONFIG", "false").lower() in ("1", "true", "yes")
+    if allow_local:
+        user_ssh_cfg = Path.home() / ".ssh" / "config"
+        if user_ssh_cfg.exists():
+            return {
+                "found": True,
+                "path": str(user_ssh_cfg),
+                "content": user_ssh_cfg.read_text(encoding="utf-8", errors="replace"),
+            }
     sample = (
         "Host prod-web-01\n"
         "    HostName 10.20.1.15\n"
@@ -1425,6 +1606,10 @@ async def ssh_websocket(
     cols: int = Query(default=100),
     rows: int = Query(default=30),
 ):
+    if not _is_ws_authenticated(websocket):
+        await websocket.close(code=1008)
+        return
+
     await websocket.accept()
     session = SESSIONS.get(session_id)
     if not session:

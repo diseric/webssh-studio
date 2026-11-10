@@ -13,11 +13,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    openssh-client \
-    iputils-ping \
     curl \
-    git \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd -g 10001 webssh \
+    && useradd -u 10001 -g webssh -m -s /usr/sbin/nologin webssh
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
@@ -25,11 +24,13 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY server.py .
 COPY static ./static
 
-RUN mkdir -p /data
+RUN mkdir -p /data && chown -R webssh:webssh /app /data
 
 VOLUME ["/data"]
 
 EXPOSE 8090
+
+USER webssh
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD curl -f http://127.0.0.1:8090/api/info || exit 1

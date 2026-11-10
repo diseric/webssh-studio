@@ -170,6 +170,15 @@ function formatUptime(sec) {
   return `${m}m ${s}s`;
 }
 
+function escapeHtml(val) {
+  return String(val ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 function getActiveSession() {
   if (!state.activeSessionId) return null;
   return state.sessions.get(state.activeSessionId) || null;
@@ -701,8 +710,8 @@ function renderRemoteFiles(entries) {
     info.innerHTML = `
       <span class="file-icon">${item.is_dir ? "📂" : "📄"}</span>
       <div class="file-details">
-        <div class="file-name" title="${item.path}">${item.name}${item.is_dir ? "/" : ""}</div>
-        <div class="file-sub">${item.permissions} • ${item.is_dir ? "Directory" : formatBytes(item.size)}</div>
+        <div class="file-name" title="${escapeHtml(item.path)}">${escapeHtml(item.name)}${item.is_dir ? "/" : ""}</div>
+        <div class="file-sub">${escapeHtml(item.permissions)} • ${item.is_dir ? "Directory" : formatBytes(item.size)}</div>
       </div>
     `;
 
@@ -1049,14 +1058,14 @@ function renderTransferQueue() {
 
     div.innerHTML = `
       <div class="transfer-item-top">
-        <span class="transfer-name" title="${item.remotePath}">${item.name}</span>
-        <span class="transfer-status ${item.status}">${statusLabel}</span>
+        <span class="transfer-name" title="${escapeHtml(item.remotePath)}">${escapeHtml(item.name)}</span>
+        <span class="transfer-status ${escapeHtml(item.status)}">${escapeHtml(statusLabel)}</span>
       </div>
       <div class="progress-bar-track">
-        <div class="progress-bar-fill" style="width: ${item.progress}%"></div>
+        <div class="progress-bar-fill" style="width: ${Number(item.progress) || 0}%"></div>
       </div>
       <div class="transfer-meta">
-        <span>→ ${item.remotePath}</span>
+        <span>→ ${escapeHtml(item.remotePath)}</span>
         <span>${formatBytes(item.size)}</span>
       </div>
     `;
@@ -1129,8 +1138,8 @@ function openParameterizedPlaybookModal(pb, vars) {
     const grp = document.createElement("div");
     grp.className = "form-group";
     grp.innerHTML = `
-      <label>{{${v.name}}}</label>
-      <input type="text" data-var="${v.name}" value="${v.defaultValue}" required />
+      <label>{{${escapeHtml(v.name)}}}</label>
+      <input type="text" data-var="${escapeHtml(v.name)}" value="${escapeHtml(v.defaultValue)}" required />
     `;
     const input = grp.querySelector("input");
     input.addEventListener("input", () => {
@@ -1205,8 +1214,8 @@ function renderPlaybooks() {
     card.innerHTML = `
       <div class="stack-card-top">
         <div>
-          <span class="stack-card-title">${pb.name}</span>
-          <span class="badge">${pb.category || "Script"}</span>
+          <span class="stack-card-title">${escapeHtml(pb.name)}</span>
+          <span class="badge">${escapeHtml(pb.category || "Script")}</span>
           ${vars.length ? `<span class="badge" style="border-color:#f59e0b;color:#fde68a;">⚡ ${vars.length} param${vars.length > 1 ? "s" : ""}</span>` : ""}
         </div>
         <div class="file-actions">
@@ -1214,8 +1223,8 @@ function renderPlaybooks() {
           <button class="file-action-btn delete del-pb-btn" title="Delete playbook">🗑</button>
         </div>
       </div>
-      ${pb.description ? `<div class="stack-card-desc">${pb.description}</div>` : ""}
-      <div class="stack-card-cmd">${pb.command}</div>
+      ${pb.description ? `<div class="stack-card-desc">${escapeHtml(pb.description)}</div>` : ""}
+      <div class="stack-card-cmd">${escapeHtml(pb.command)}</div>
     `;
     card.querySelector(".run-pb-btn").addEventListener("click", async () => {
       if (vars.length > 0) {
@@ -1270,10 +1279,10 @@ async function refreshTelemetry(sessionId) {
         .map(
           (p) => `
           <tr>
-            <td>${p.pid}</td>
-            <td>${p.name}</td>
-            <td>${p.cpu}%</td>
-            <td>${p.mem}%</td>
+            <td>${escapeHtml(p.pid)}</td>
+            <td>${escapeHtml(p.name)}</td>
+            <td>${escapeHtml(p.cpu)}%</td>
+            <td>${escapeHtml(p.mem)}%</td>
           </tr>
         `
         )
@@ -1300,7 +1309,7 @@ function renderVaultProfiles() {
     const pill = document.createElement("div");
     pill.className = "profile-pill";
     pill.innerHTML = `
-      <span>🔐 <strong>${prof.name}</strong> <small>(${prof.username}@${prof.host}:${prof.port})</small></span>
+      <span>🔐 <strong>${escapeHtml(prof.name)}</strong> <small>(${escapeHtml(prof.username)}@${escapeHtml(prof.host)}:${escapeHtml(prof.port)})</small></span>
       <button type="button" class="btn btn-xs btn-primary connect-prof-btn">Connect</button>
     `;
     pill.addEventListener("click", () => {
@@ -1363,17 +1372,17 @@ function renderTunnels(tunnels) {
     card.innerHTML = `
       <div class="stack-card-top">
         <div>
-          <span class="stack-card-title">🚇 ${tun.label}</span>
+          <span class="stack-card-title">🚇 ${escapeHtml(tun.label)}</span>
           <span class="badge">Active</span>
         </div>
         <div class="file-actions">
-          <a href="http://127.0.0.1:${tun.local_port}" target="_blank" class="btn btn-xs btn-outline">🔗 Open</a>
+          <a href="http://127.0.0.1:${encodeURIComponent(tun.local_port)}" target="_blank" class="btn btn-xs btn-outline">🔗 Open</a>
           <button class="file-action-btn delete close-tun-btn" title="Stop tunnel">✕</button>
         </div>
       </div>
-      <div class="stack-card-cmd">127.0.0.1:${tun.local_port} ➔ ${tun.remote_host}:${tun.remote_port}</div>
+      <div class="stack-card-cmd">127.0.0.1:${escapeHtml(tun.local_port)} ➔ ${escapeHtml(tun.remote_host)}:${escapeHtml(tun.remote_port)}</div>
       <div class="transfer-meta">
-        <span>Active conns: ${tun.active_connections}</span>
+        <span>Active conns: ${escapeHtml(tun.active_connections)}</span>
         <span>Traffic: ${formatBytes(tun.bytes_transferred)}</span>
       </div>
     `;

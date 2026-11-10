@@ -16,3 +16,15 @@ services:
       - WEBSSH_TRUST_PROXY_HEADERS=${WEBSSH_TRUST_PROXY_HEADERS:-false}
     volumes:
       - ./data:/data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
